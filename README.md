@@ -57,7 +57,7 @@ src/
 {
   "mcpServers": {
     "stockdata": {
-      "type": "streamable-http",
+      "type": "http",
       "url": "http://localhost:8000/mcp"
     }
   }
