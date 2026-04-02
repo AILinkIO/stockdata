@@ -1,9 +1,15 @@
-# Implementation of the FinancialDataSource interface using Baostock
+"""
+Baostock 数据源实现。
+
+基于 Baostock Python SDK 实现 FinancialDataSource 接口，
+提供 A 股行情、财务报表、宏观经济、指数成分股等数据查询能力。
+每次 API 调用通过 baostock_login_context() 自动管理登录/登出。
+"""
 import baostock as bs
 import pandas as pd
 from typing import List, Optional
 import logging
-from .data_source_interface import FinancialDataSource, DataSourceError, NoDataFoundError, LoginError
+from .interface import FinancialDataSource, DataSourceError, NoDataFoundError, LoginError
 from .utils import baostock_login_context
 
 # Get a logger instance for this module

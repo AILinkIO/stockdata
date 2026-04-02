@@ -1,1 +1,1 @@
-# This file makes src a Python package
+"""A股数据 MCP 服务器核心包，包含数据源、工具、用例、格式化等子模块。"""

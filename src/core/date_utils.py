@@ -1,18 +1,35 @@
-"""Use cases for date utility tools."""
+"""
+交易日期计算模块。
+
+提供 A 股交易日期相关的纯业务逻辑函数，包括：
+- 查找最新交易日
+- 根据分析周期计算起止日期范围
+- 判断某日是否为交易日
+- 查找前一个 / 后一个交易日
+- 获取最近 N 个交易日
+- 获取指定年份各月末交易日
+
+所有函数接收 FinancialDataSource 实例作为参数，
+通过 get_trade_dates() 获取交易日历数据后进行计算。
+"""
 import calendar
 from datetime import datetime, timedelta
-from typing import Optional
 
 import pandas as pd
 
-from src.data_source_interface import FinancialDataSource
+from src.providers.interface import FinancialDataSource
 
 
 def _fetch_trading_days(data_source: FinancialDataSource, start_date: str, end_date: str) -> pd.DataFrame:
+    """从数据源获取指定范围内的交易日历。"""
     return data_source.get_trade_dates(start_date=start_date, end_date=end_date)
 
 
 def get_latest_trading_date(data_source: FinancialDataSource) -> str:
+    """获取截至今天的最新交易日。
+
+    查询当月交易日历，返回不超过今天的最近一个交易日。
+    """
     today = datetime.now().strftime("%Y-%m-%d")
     start_date = datetime.now().replace(day=1).strftime("%Y-%m-%d")
     end_date = datetime.now().replace(day=28).strftime("%Y-%m-%d")
@@ -26,9 +43,22 @@ def get_latest_trading_date(data_source: FinancialDataSource) -> str:
 
 
 def get_market_analysis_timeframe(period: str = "recent") -> str:
+    """根据分析周期返回起止日期范围字符串。
+
+    Args:
+        period: 分析周期，可选值：
+            - 'recent':    近期（月初至今，若当月不足半月则向前延展一个月）
+            - 'quarter':   本季度
+            - 'half_year': 本半年
+            - 'year':      本年度
+
+    Returns:
+        格式为 "YYYY-MM-DD 至 YYYY-MM-DD" 的日期范围字符串
+    """
     now = datetime.now()
     end_date = now
     if period == "recent":
+        # 若当月已过15日，从本月1日开始；否则向前延展一个月
         if now.day < 15:
             if now.month == 1:
                 start_date = datetime(now.year - 1, 11, 1)
@@ -54,6 +84,7 @@ def get_market_analysis_timeframe(period: str = "recent") -> str:
 
 
 def is_trading_day(data_source: FinancialDataSource, *, date: str) -> str:
+    """判断指定日期是否为交易日，返回 '是'、'否' 或 '未知'。"""
     df = _fetch_trading_days(data_source, start_date=date, end_date=date)
     if df.empty:
         return "未知"
@@ -62,6 +93,7 @@ def is_trading_day(data_source: FinancialDataSource, *, date: str) -> str:
 
 
 def previous_trading_day(data_source: FinancialDataSource, *, date: str) -> str:
+    """获取指定日期之前的最近一个交易日。向前搜索最多31天。"""
     target = datetime.strptime(date, "%Y-%m-%d")
     start = (target - timedelta(days=31)).strftime("%Y-%m-%d")
     df = _fetch_trading_days(data_source, start_date=start, end_date=date)
@@ -71,6 +103,7 @@ def previous_trading_day(data_source: FinancialDataSource, *, date: str) -> str:
 
 
 def next_trading_day(data_source: FinancialDataSource, *, date: str) -> str:
+    """获取指定日期之后的最近一个交易日。向后搜索最多31天。"""
     target = datetime.strptime(date, "%Y-%m-%d")
     end = (target + timedelta(days=31)).strftime("%Y-%m-%d")
     df = _fetch_trading_days(data_source, start_date=date, end_date=end)
@@ -80,7 +113,9 @@ def next_trading_day(data_source: FinancialDataSource, *, date: str) -> str:
 
 
 def get_last_n_trading_days(data_source: FinancialDataSource, *, days: int) -> str:
+    """获取截至今天的最近 N 个交易日，以逗号分隔返回。"""
     today = datetime.now()
+    # 向前取 2 倍天数的日历范围，确保覆盖足够的交易日
     start = (today - timedelta(days=days * 2)).strftime("%Y-%m-%d")
     end = today.strftime("%Y-%m-%d")
     df = _fetch_trading_days(data_source, start_date=start, end_date=end)
@@ -89,6 +124,7 @@ def get_last_n_trading_days(data_source: FinancialDataSource, *, days: int) -> s
 
 
 def get_recent_trading_range(data_source: FinancialDataSource, *, days: int) -> str:
+    """获取最近 N 个交易日的起止日期范围，格式为 "起始日 至 结束日"。"""
     today = datetime.now()
     start = (today - timedelta(days=days * 2)).strftime("%Y-%m-%d")
     end = today.strftime("%Y-%m-%d")
@@ -100,6 +136,10 @@ def get_recent_trading_range(data_source: FinancialDataSource, *, days: int) -> 
 
 
 def get_month_end_trading_dates(data_source: FinancialDataSource, *, year: int) -> str:
+    """获取指定年份每个月最后一个交易日，以逗号分隔返回。
+
+    对每个月取最后7天的交易日历，选取其中最后一个交易日。
+    """
     results = []
     for month in range(1, 13):
         last_day = calendar.monthrange(year, month)[1]

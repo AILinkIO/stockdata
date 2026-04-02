@@ -1,5 +1,12 @@
 """
-Markdown formatting utilities for A-Share MCP Server.
+数据输出格式化模块。
+
+将 pandas DataFrame 转换为 MCP 工具返回给 LLM 的字符串格式，支持：
+- markdown: Markdown 表格（默认），适合 LLM 阅读和展示
+- json: JSON 格式，包含 data 数组和 meta 元信息
+- csv: CSV 格式，适合结构化导出
+
+所有格式均支持行数截断（默认 250 行），避免超长输出占用过多 token。
 """
 import pandas as pd
 import logging
@@ -7,19 +14,21 @@ import json
 
 logger = logging.getLogger(__name__)
 
-# Configuration: Max rows to display in string outputs to protect context length
+# 最大输出行数，防止返回数据过多导致 LLM 上下文溢出
 MAX_MARKDOWN_ROWS = 250
 
 
 def format_df_to_markdown(df: pd.DataFrame, max_rows: int = None) -> str:
-    """Formats a Pandas DataFrame to a Markdown string with row truncation.
+    """将 DataFrame 格式化为 Markdown 表格字符串。
+
+    超出 max_rows 限制的数据会被截断，并在输出开头添加截断提示。
 
     Args:
-        df: The DataFrame to format
-        max_rows: Maximum rows to include in output. Defaults to MAX_MARKDOWN_ROWS if None.
+        df: 待格式化的 DataFrame
+        max_rows: 最大输出行数，默认使用 MAX_MARKDOWN_ROWS
 
     Returns:
-        A markdown formatted string representation of the DataFrame
+        Markdown 格式的表格字符串，或无数据提示
     """
     if df is None or df.empty:
         logger.warning("Attempted to format an empty DataFrame to Markdown.")
@@ -52,16 +61,16 @@ def format_table_output(
     max_rows: int | None = None,
     meta: dict | None = None,
 ) -> str:
-    """Formats a DataFrame into the requested string format with optional meta.
+    """将 DataFrame 格式化为指定格式的字符串，支持附加元信息。
 
     Args:
-        df: Data to format.
-        format: 'markdown' | 'json' | 'csv'. Defaults to 'markdown'.
-        max_rows: Optional max rows to include (defaults depend on formatters).
-        meta: Optional metadata dict to include (prepended for markdown, embedded for json).
+        df: 待格式化的数据
+        format: 输出格式，可选 'markdown'（默认）、'json'、'csv'
+        max_rows: 最大输出行数，默认使用 MAX_MARKDOWN_ROWS
+        meta: 可选的元信息字典，markdown 格式下作为头部输出，json 格式下嵌入 meta 字段
 
     Returns:
-        A string suitable for tool responses.
+        适合作为 MCP 工具返回值的格式化字符串
     """
     fmt = (format or "markdown").lower()
 

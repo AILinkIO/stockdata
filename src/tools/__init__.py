@@ -1,1 +1,1 @@
-# Initialization file for tools package
+"""MCP 工具注册子包，每个模块对应一组功能相关的工具。"""

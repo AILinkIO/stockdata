@@ -1,1 +1,1 @@
-"""Shared services for validation and execution helpers."""
+"""共享服务子包，包含参数校验和工具执行错误处理。"""

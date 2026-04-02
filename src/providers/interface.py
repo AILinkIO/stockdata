@@ -1,28 +1,47 @@
-# Defines the abstract interface for financial data sources
+"""
+金融数据源抽象接口定义。
+
+定义了 FinancialDataSource 抽象基类，规定所有数据源实现必须提供的方法。
+当前实现为 BaostockDataSource（见 providers/baostock.py），
+后续可扩展为 Akshare、Tushare 等其他数据源。
+
+同时定义了数据源层的异常层次结构：
+- DataSourceError    — 数据源基础异常
+  - LoginError       — 数据源登录失败
+  - NoDataFoundError — 查询条件下无数据返回
+"""
 from abc import ABC, abstractmethod
 import pandas as pd
 from typing import Optional, List
 
+
 class DataSourceError(Exception):
-    """Base exception for data source errors."""
+    """数据源基础异常类。"""
     pass
 
 
 class LoginError(DataSourceError):
-    """Exception raised for login failures to the data source."""
+    """数据源登录失败时抛出。"""
     pass
 
 
 class NoDataFoundError(DataSourceError):
-    """Exception raised when no data is found for the given query."""
+    """查询条件下无数据返回时抛出。"""
     pass
 
 
 class FinancialDataSource(ABC):
     """
-    Abstract base class defining the interface for financial data sources.
-    Implementations of this class provide access to specific financial data APIs
-    (e.g., Baostock, Akshare).
+    金融数据源抽象基类。
+
+    定义了获取 A 股市场各类数据的标准接口，包括：
+    - 股票行情（K线、基本信息、分红、复权因子）
+    - 财务报表（利润、营运、成长、资产负债、现金流、杜邦分析）
+    - 市场概览（交易日历、全部股票列表）
+    - 宏观经济（存贷款利率、存款准备金率、货币供应量）
+    - 指数与行业（成分股、行业分类）
+
+    所有方法返回 pandas DataFrame，具体列名由实现类决定。
     """
 
     @abstractmethod

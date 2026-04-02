@@ -1,10 +1,20 @@
-"""Validation utilities for tool inputs."""
+"""
+工具输入参数校验模块。
+
+集中定义各工具参数的合法值，并提供统一的校验函数。
+校验失败时抛出 ValueError，由 run_tool_with_handling 统一捕获并返回错误信息。
+"""
 from typing import Iterable
 
+# K线数据频率: d=日, w=周, m=月, 5/15/30/60=分钟
 VALID_FREQS = ["d", "w", "m", "5", "15", "30", "60"]
+# 复权类型: 1=后复权, 2=前复权, 3=不复权
 VALID_ADJUST_FLAGS = ["1", "2", "3"]
+# 输出格式
 VALID_FORMATS = ["markdown", "json", "csv"]
+# 分红年份类型: report=预案公告年份, operate=除权除息年份
 VALID_YEAR_TYPES = ["report", "operate"]
+# 存款准备金率年份类型: 0=全部, 1=大型, 2=中小型
 VALID_RESERVE_YEAR_TYPES = ["0", "1", "2"]
 
 
