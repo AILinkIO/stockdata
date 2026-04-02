@@ -17,14 +17,15 @@ from .interface import FinancialDataSource
 logger = logging.getLogger(__name__)
 
 # ── TTL 常量（秒） ──
-PERMANENT: None = None       # 历史确定性数据，永不过期
+PERMANENT = 7776000          # 90 天 — 历史确定性数据兜底，防止无限膨胀
 TTL_REALTIME = 300           # 5 分钟 — 盘中可能变化
 TTL_DAILY = 86400            # 1 天
 TTL_WEEKLY = 604800          # 7 天
 TTL_ADJ_KLINE_MAX = 2592000  # 30 天 — 复权K线兜底清理（fingerprint 变化后旧条目的最大存活时间）
 
-# 默认缓存目录
+# 默认缓存配置
 _DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / ".cache" / "stockdata"
+_DEFAULT_SIZE_LIMIT = 2**30  # 1 GiB
 
 
 # ── 辅助函数 ──
@@ -120,10 +121,13 @@ def _make_key(method_name: str, **kwargs) -> tuple:
 class CachedDataSource(FinancialDataSource):
     """为 FinancialDataSource 添加 diskcache 缓存层的代理类。"""
 
-    def __init__(self, delegate: FinancialDataSource, cache_dir: Path = _DEFAULT_CACHE_DIR):
+    def __init__(self, delegate: FinancialDataSource, cache_dir: Path = _DEFAULT_CACHE_DIR,
+                 size_limit: int = _DEFAULT_SIZE_LIMIT):
         self._delegate = delegate
-        self._cache = Cache(str(cache_dir))
-        logger.info(f"数据缓存已启用，存储目录: {cache_dir}")
+        self._cache = Cache(str(cache_dir), size_limit=size_limit)
+        expired = self._cache.expire()  # 启动时主动清理过期条目
+        logger.info(f"数据缓存已启用，存储目录: {cache_dir}，大小限制: {size_limit / 2**20:.0f} MiB，"
+                     f"本次清理过期条目: {expired} 条")
 
     def _get_or_fetch(self, method_name: str, ttl: Optional[int], **kwargs) -> pd.DataFrame:
         """缓存查找 → 未命中则调用底层数据源 → 写入缓存。"""
