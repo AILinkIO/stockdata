@@ -12,7 +12,7 @@ from typing import Optional
 import pandas as pd
 from diskcache import Cache
 
-from .interface import FinancialDataSource
+from .interface import FinancialDataSource, NoDataFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,16 @@ TTL_REALTIME = 300           # 5 分钟 — 盘中可能变化
 TTL_DAILY = 86400            # 1 天
 TTL_WEEKLY = 604800          # 7 天
 TTL_ADJ_KLINE_MAX = 2592000  # 30 天 — 复权K线兜底清理（fingerprint 变化后旧条目的最大存活时间）
+
+# get_fina_indicator 聚合查询的各类别方法与前缀（与 baostock._FINA_CATEGORIES 对应）
+_FINA_CATEGORY_METHODS = [
+    ("get_profit_data", "profit"),
+    ("get_operation_data", "operation"),
+    ("get_growth_data", "growth"),
+    ("get_balance_data", "balance"),
+    ("get_cash_flow_data", "cashflow"),
+    ("get_dupont_data", "dupont"),
+]
 
 # 默认缓存配置
 _DEFAULT_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / ".cache" / "stockdata"
@@ -240,11 +250,61 @@ class CachedDataSource(FinancialDataSource):
                                   code=code, start_date=start_date, end_date=end_date)
 
     def get_fina_indicator(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """聚合综合财务指标，复用按季度缓存的各类财务数据。
+
+        与 BaostockDataSource.get_fina_indicator 不同，此方法通过调用
+        self.get_profit_data() 等已缓存的按季度方法组装结果，
+        避免重复查询已缓存的季度数据。
+        """
         current_year = str(_today().year)
         d = _parse_date(end_date)
         ttl = PERMANENT if (d and str(d.year) < current_year) else TTL_DAILY
-        return self._get_or_fetch("get_fina_indicator", ttl,
-                                  code=code, start_date=start_date, end_date=end_date)
+
+        # 整体缓存检查
+        key = _make_key("get_fina_indicator", code=code, start_date=start_date, end_date=end_date)
+        cached = self._cache.get(key)
+        if cached is not None:
+            logger.debug("缓存命中: get_fina_indicator")
+            return cached
+
+        # 缓存未命中：从按季度缓存的子方法组装
+        start = datetime.strptime(start_date, "%Y-%m-%d")
+        end = datetime.strptime(end_date, "%Y-%m-%d")
+
+        records = []
+        for year in range(start.year, end.year + 1):
+            for quarter in range(1, 5):
+                quarter_start = datetime(year, (quarter - 1) * 3 + 1, 1)
+                if quarter_start > end:
+                    continue
+                logger.info(f"综合财务指标 {code} {year}Q{quarter}: 正在组装")
+                record = self._build_fina_quarter(code, str(year), quarter)
+                if record:
+                    records.append(record)
+
+        if not records:
+            raise NoDataFoundError(f"综合财务指标 {code} {start_date}~{end_date}: 查询结果为空")
+
+        df = pd.DataFrame(records)
+        logger.info(f"综合财务指标 {code} {start_date}~{end_date}: 获取 {len(df)} 条记录")
+        self._cache.set(key, df, expire=ttl)
+        return df
+
+    def _build_fina_quarter(self, code: str, year: str, quarter: int) -> dict | None:
+        """从缓存层的按季度方法组装一条聚合财务指标记录。"""
+        record: dict = {"code": code, "year": year, "quarter": quarter}
+        for method_name, prefix in _FINA_CATEGORY_METHODS:
+            try:
+                df = getattr(self, method_name)(code=code, year=year, quarter=quarter)
+                if df is not None and not df.empty:
+                    row = df.iloc[0]
+                    for col in df.columns:
+                        record[f"{prefix}_{col}"] = row[col]
+            except Exception:
+                pass  # 单类别失败不影响其他类别，与原逻辑一致
+        if len(record) <= 3:
+            return None
+        return record
 
     # ── 市场概览 ──
 
