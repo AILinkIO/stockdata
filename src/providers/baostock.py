@@ -3,7 +3,7 @@ Baostock 数据源实现。
 
 基于 Baostock Python SDK 实现 FinancialDataSource 接口，
 提供 A 股行情、财务报表、宏观经济、指数成分股等数据查询能力。
-每次 API 调用通过 login_baostock() 自动管理登录/登出。
+通过 baostock_session() 复用持久会话，遇会话失效自动重连。
 """
 import logging
 from datetime import datetime
@@ -13,7 +13,7 @@ import baostock as bs
 import pandas as pd
 
 from .interface import DataSourceError, LoginError, NoDataFoundError, FinancialDataSource
-from .context import login_baostock
+from .context import baostock_session, relogin
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,9 @@ _FINA_CATEGORIES = [
 # ── 通用查询工具函数 ──
 
 
+_SESSION_EXPIRED_CODE = '10001001'
+
+
 def _check_api_error(rs, description: str) -> None:
     """检查 Baostock API 返回的错误码，失败时抛出对应异常。"""
     if rs.error_code == '0':
@@ -77,15 +80,20 @@ def _collect_rows(rs, description: str) -> pd.DataFrame:
 
 
 def _query(bs_func, description: str, **kwargs) -> pd.DataFrame:
-    """统一的 Baostock 查询流程：登录 → 调用 API → 校验 → 收集数据。
+    """统一的 Baostock 查询流程：调用 API → 校验 → 收集数据。
 
+    会话失效时自动重连并重试一次。
     所有已知异常（LoginError / NoDataFoundError / DataSourceError / ValueError）
     直接透传；未预期异常包装为 DataSourceError。
     """
     logger.info(f"正在查询 {description}")
     try:
-        with login_baostock():
+        with baostock_session():
             rs = bs_func(**kwargs)
+            if rs.error_code == _SESSION_EXPIRED_CODE:
+                logger.warning(f"{description}: 会话失效，正在重连")
+                relogin()
+                rs = bs_func(**kwargs)
             _check_api_error(rs, description)
             return _collect_rows(rs, description)
     except (LoginError, NoDataFoundError, DataSourceError, ValueError):
@@ -95,9 +103,15 @@ def _query(bs_func, description: str, **kwargs) -> pd.DataFrame:
 
 
 def _query_fina_category(bs_func, prefix: str, code: str, year: str, quarter: int) -> dict:
-    """查询单个财务指标类别，返回带前缀的字段字典。查询失败时返回空字典。"""
+    """查询单个财务指标类别，返回带前缀的字段字典。查询失败时返回空字典。
+
+    必须在 baostock_session() 内调用。会话失效时自动重连。
+    """
     try:
         rs = bs_func(code=code, year=year, quarter=quarter)
+        if rs.error_code == _SESSION_EXPIRED_CODE:
+            relogin()
+            rs = bs_func(code=code, year=year, quarter=quarter)
         if rs.error_code != '0' or not rs.next():
             return {}
         row = rs.get_row_data()
@@ -212,7 +226,7 @@ class BaostockDataSource(FinancialDataSource):
 
         try:
             records = []
-            with login_baostock():
+            with baostock_session():
                 for year in range(start.year, end.year + 1):
                     for quarter in range(1, 5):
                         quarter_start = datetime(year, (quarter - 1) * 3 + 1, 1)
