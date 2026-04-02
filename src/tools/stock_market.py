@@ -7,11 +7,8 @@
 - 分红送转数据
 - 复权因子数据
 """
-import logging
-from typing import List, Optional
-
 from src.data_source import active_data_source
-from src.formatting.markdown_formatter import format_table_output
+from src.formatting.markdown import format_table_output
 from src.server import app
 from src.services.tool_runner import run_tool_with_handling
 from src.services.validation import (
@@ -22,8 +19,6 @@ from src.services.validation import (
     validate_year_type,
 )
 
-logger = logging.getLogger(__name__)
-
 
 @app.tool()
 def get_historical_k_data(
@@ -32,44 +27,22 @@ def get_historical_k_data(
     end_date: str,
     frequency: str = "d",
     adjust_flag: str = "3",
-    fields: Optional[List[str]] = None,
+    fields: list[str] | None = None,
     limit: int = 250,
     format: str = "markdown",
 ) -> str:
-    """
-    Fetches historical K-line (OHLCV) data for a Chinese A-share stock.
+    """获取 A 股历史 K 线（OHLCV）数据。
 
     Args:
-        code: The stock code in Baostock format (e.g., 'sh.600000', 'sz.000001').
-        start_date: Start date in 'YYYY-MM-DD' format.
-        end_date: End date in 'YYYY-MM-DD' format.
-        frequency: Data frequency. Valid options (from Baostock):
-                     'd': daily
-                     'w': weekly
-                     'm': monthly
-                     '5': 5 minutes
-                     '15': 15 minutes
-                     '30': 30 minutes
-                     '60': 60 minutes
-                   Defaults to 'd'.
-        adjust_flag: Adjustment flag for price/volume. Valid options (from Baostock):
-                       '1': Forward adjusted (后复权)
-                       '2': Backward adjusted (前复权)
-                       '3': Non-adjusted (不复权)
-                     Defaults to '3'.
-        fields: Optional list of specific data fields to retrieve (must be valid Baostock fields).
-                If None or empty, default fields will be used (e.g., date, code, open, high, low, close, volume, amount, pctChg).
-        limit: Max rows to return. Defaults to 250.
-        format: Output format: 'markdown' | 'json' | 'csv'. Defaults to 'markdown'.
-
-        Returns:
-            A Markdown formatted string containing the K-line data table, or an error message.
-            The table might be truncated if the result set is too large.
-        """
-    logger.info(
-        f"Tool 'get_historical_k_data' called for {code} ({start_date}-{end_date}, freq={frequency}, adj={adjust_flag}, fields={fields})"
-    )
-
+        code: Baostock 格式股票代码，如 'sh.600000'、'sz.000001'
+        start_date: 起始日期，'YYYY-MM-DD' 格式
+        end_date: 结束日期，'YYYY-MM-DD' 格式
+        frequency: 数据频率（'d' 日 / 'w' 周 / 'm' 月 / '5'/'15'/'30'/'60' 分钟），默认 'd'
+        adjust_flag: 复权类型（'1' 后复权 / '2' 前复权 / '3' 不复权），默认 '3'
+        fields: 可选字段列表，为 None 时使用默认字段
+        limit: 最大返回行数，默认 250
+        format: 输出格式 'markdown' | 'json' | 'csv'，默认 'markdown'
+    """
     def action():
         validate_frequency(frequency)
         validate_adjust_flag(adjust_flag)
@@ -86,79 +59,60 @@ def get_historical_k_data(
 
 
 @app.tool()
-def get_stock_basic_info(code: str, fields: Optional[List[str]] = None, format: str = "markdown") -> str:
-    """
-    Fetches basic information for a given Chinese A-share stock.
+def get_stock_basic_info(code: str, fields: list[str] | None = None, format: str = "markdown") -> str:
+    """获取股票基本信息（名称、行业、上市日期等）。
 
     Args:
-        code: The stock code in Baostock format (e.g., 'sh.600000', 'sz.000001').
-        fields: Optional list to select specific columns from the available basic info
-                (e.g., ['code', 'code_name', 'industry', 'listingDate']).
-                If None or empty, returns all available basic info columns from Baostock.
-
-    Returns:
-        Basic stock information in the requested format.
+        code: Baostock 格式股票代码，如 'sh.600000'
+        fields: 可选字段过滤列表（如 ['code', 'code_name', 'industry']），为 None 时返回全部
+        format: 输出格式 'markdown' | 'json' | 'csv'，默认 'markdown'
     """
-    logger.info(f"Tool 'get_stock_basic_info' called for {code} (fields={fields})")
-
     def action():
         validate_output_format(format)
         df = active_data_source.get_stock_basic_info(code=code, fields=fields)
-        meta = {"code": code}
-        return format_table_output(df, format=format, max_rows=df.shape[0] if df is not None else 0, meta=meta)
+        rows = df.shape[0] if df is not None else 0
+        return format_table_output(df, format=format, max_rows=rows, meta={"code": code})
 
     return run_tool_with_handling(action, context=f"get_stock_basic_info:{code}")
 
 
 @app.tool()
 def get_dividend_data(code: str, year: str, year_type: str = "report", limit: int = 250, format: str = "markdown") -> str:
-    """
-    Fetches dividend information for a given stock code and year.
+    """获取股票分红送转数据。
 
     Args:
-        code: The stock code in Baostock format (e.g., 'sh.600000', 'sz.000001').
-        year: The year to query (e.g., '2023').
-        year_type: Type of year. Valid options (from Baostock):
-                     'report': Announcement year (预案公告年份)
-                     'operate': Ex-dividend year (除权除息年份)
-                   Defaults to 'report'.
-
-    Returns:
-        Dividend records table.
+        code: Baostock 格式股票代码
+        year: 查询年份，如 '2023'
+        year_type: 年份类型（'report' 预案公告年份 / 'operate' 除权除息年份），默认 'report'
+        limit: 最大返回行数，默认 250
+        format: 输出格式，默认 'markdown'
     """
-    logger.info(f"Tool 'get_dividend_data' called for {code}, year={year}, year_type={year_type}")
-
     def action():
         validate_year(year)
         validate_year_type(year_type)
         validate_output_format(format)
         df = active_data_source.get_dividend_data(code=code, year=year, year_type=year_type)
-        meta = {"code": code, "year": year, "year_type": year_type}
-        return format_table_output(df, format=format, max_rows=limit, meta=meta)
+        return format_table_output(df, format=format, max_rows=limit,
+                                   meta={"code": code, "year": year, "year_type": year_type})
 
     return run_tool_with_handling(action, context=f"get_dividend_data:{code}:{year}")
 
 
 @app.tool()
 def get_adjust_factor_data(code: str, start_date: str, end_date: str, limit: int = 250, format: str = "markdown") -> str:
-    """
-    Fetches adjustment factor data for a given stock code and date range.
-    Uses Baostock's "涨跌幅复权算法" factors. Useful for calculating adjusted prices.
+    """获取复权因子数据，用于计算前/后复权价格。
 
     Args:
-        code: The stock code in Baostock format (e.g., 'sh.600000', 'sz.000001').
-        start_date: Start date in 'YYYY-MM-DD' format.
-        end_date: End date in 'YYYY-MM-DD' format.
-
-    Returns:
-        Adjustment factors table.
+        code: Baostock 格式股票代码
+        start_date: 起始日期，'YYYY-MM-DD' 格式
+        end_date: 结束日期，'YYYY-MM-DD' 格式
+        limit: 最大返回行数，默认 250
+        format: 输出格式，默认 'markdown'
     """
-    logger.info(f"Tool 'get_adjust_factor_data' called for {code} ({start_date} to {end_date})")
-
     def action():
         validate_output_format(format)
         df = active_data_source.get_adjust_factor_data(code=code, start_date=start_date, end_date=end_date)
-        meta = {"code": code, "start_date": start_date, "end_date": end_date}
-        return format_table_output(df, format=format, max_rows=limit, meta=meta)
+        return format_table_output(df, format=format, max_rows=limit,
+                                   meta={"code": code, "start_date": start_date, "end_date": end_date})
 
     return run_tool_with_handling(action, context=f"get_adjust_factor_data:{code}")
