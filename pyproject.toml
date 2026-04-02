@@ -12,7 +12,7 @@ dependencies = [
     "tabulate>=0.10.0",
 ]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=8.3.0",
 ]
