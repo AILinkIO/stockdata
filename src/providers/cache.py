@@ -4,6 +4,7 @@
 通过装饰器模式为 FinancialDataSource 添加 diskcache 缓存层，对上层完全透明。
 详细缓存策略见 docs/cache-strategy.md。
 """
+import calendar
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -61,27 +62,6 @@ def _is_past_date(date_str: Optional[str]) -> bool:
     return d is not None and d.date() < _today().date()
 
 
-def _is_period_completed(end_date: str, frequency: str) -> bool:
-    """判断 K 线周期是否已完成（最后一根K线已定型）。
-
-    - 日K / 分钟K：end_date < 今天
-    - 周K：end_date < 本周一
-    - 月K：end_date < 本月1日
-    """
-    d = _parse_date(end_date)
-    if d is None:
-        return False
-    today = _today().date()
-    if frequency in ("d", "5", "15", "30", "60"):
-        return d.date() < today
-    if frequency == "w":
-        this_monday = today - timedelta(days=today.weekday())
-        return d.date() < this_monday
-    if frequency == "m":
-        first_of_month = today.replace(day=1)
-        return d.date() < first_of_month
-    return False
-
 
 def _is_past_quarter(year: str, quarter: int) -> bool:
     """判断该季度的财报披露截止日是否已过。
@@ -125,6 +105,60 @@ def _make_key(method_name: str, **kwargs) -> tuple:
     return (method_name, tuple(sorted(kwargs.items())))
 
 
+# ── K 线按月拆分缓存辅助函数 ──
+
+
+def _generate_months(start_date: str, end_date: str) -> list[tuple[int, int]]:
+    """生成日期范围内所有 (year, month) 元组。"""
+    start = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+    months = []
+    y, m = start.year, start.month
+    while (y, m) <= (end.year, end.month):
+        months.append((y, m))
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return months
+
+
+def _month_date_range(year: int, month: int) -> tuple[str, str]:
+    """返回指定月份的 (首日, 末日) 日期字符串。"""
+    last_day = calendar.monthrange(year, month)[1]
+    return f"{year:04d}-{month:02d}-01", f"{year:04d}-{month:02d}-{last_day:02d}"
+
+
+def _is_month_completed(year: int, month: int, frequency: str) -> bool:
+    """判断指定月份的 K 线数据是否已定型（全部K线已收盘）。"""
+    last_day = datetime(year, month, calendar.monthrange(year, month)[1]).date()
+    today = _today().date()
+    if frequency in ("d", "5", "15", "30", "60"):
+        return last_day < today
+    if frequency == "w":
+        this_monday = today - timedelta(days=today.weekday())
+        return last_day < this_monday
+    if frequency == "m":
+        return last_day < today.replace(day=1)
+    return False
+
+
+def _group_contiguous_months(
+    months: list[tuple[int, int]],
+) -> list[tuple[tuple[int, int], tuple[int, int]]]:
+    """将连续月份分组，返回 [(起始月, 结束月), ...] 列表。"""
+    if not months:
+        return []
+    groups: list[tuple[tuple[int, int], tuple[int, int]]] = []
+    group_start = prev = months[0]
+    for ym in months[1:]:
+        expected = (prev[0] + 1, 1) if prev[1] == 12 else (prev[0], prev[1] + 1)
+        if ym == expected:
+            prev = ym
+        else:
+            groups.append((group_start, prev))
+            group_start = prev = ym
+    groups.append((group_start, prev))
+    return groups
+
+
 # ── 缓存代理类 ──
 
 
@@ -166,12 +200,9 @@ class CachedDataSource(FinancialDataSource):
                               fields: Optional[list[str]] = None) -> pd.DataFrame:
         field_key = tuple(fields) if fields else None
         if adjust_flag == "3":
-            # 不复权：按频率判断周期是否完成
-            ttl = PERMANENT if _is_period_completed(end_date, frequency) else TTL_REALTIME
-            return self._get_or_fetch(
-                "get_historical_k_data", ttl,
-                code=code, start_date=start_date, end_date=end_date,
-                frequency=frequency, adjust_flag=adjust_flag, fields=field_key,
+            # 不复权：按月拆分缓存
+            return self._get_k_data_by_month(
+                code, start_date, end_date, frequency, adjust_flag, fields, field_key,
             )
         # 复权：将复权因子 fingerprint 嵌入缓存 key
         fp = self._get_adjust_fingerprint(code, start_date, end_date)
@@ -193,6 +224,60 @@ class CachedDataSource(FinancialDataSource):
         # 兜底 TTL 防止 fingerprint 变化后旧条目长期残留
         self._cache.set(key, df, expire=TTL_ADJ_KLINE_MAX)
         return df
+
+    def _get_k_data_by_month(
+        self, code: str, start_date: str, end_date: str,
+        frequency: str, adjust_flag: str,
+        fields: Optional[list[str]], field_key,
+    ) -> pd.DataFrame:
+        """不复权 K 线按月拆分缓存：逐月查缓存，缺失月份合并为最少 API 调用，结果按月回填缓存。"""
+        months = _generate_months(start_date, end_date)
+
+        # 1. 逐月检查缓存
+        cached_chunks: dict[tuple[int, int], pd.DataFrame] = {}
+        missing_months: list[tuple[int, int]] = []
+        for ym in months:
+            key = _make_key("k_month", code=code, year=ym[0], month=ym[1],
+                            frequency=frequency, adjust_flag=adjust_flag, fields=field_key)
+            cached = self._cache.get(key)
+            if cached is not None:
+                cached_chunks[ym] = cached
+            else:
+                missing_months.append(ym)
+
+        if not missing_months:
+            logger.debug(f"缓存命中: K线(按月) {code} 全部 {len(months)} 个月")
+        else:
+            logger.debug(f"缓存部分命中: K线(按月) {code} 命中 {len(cached_chunks)}/{len(months)}，"
+                         f"需查询 {len(missing_months)} 个月")
+            # 2. 合并连续缺失月份为一次 API 调用
+            for group_start, group_end in _group_contiguous_months(missing_months):
+                fetch_start = _month_date_range(group_start[0], group_start[1])[0]
+                fetch_end = _month_date_range(group_end[0], group_end[1])[1]
+                try:
+                    df = self._delegate.get_historical_k_data(
+                        code=code, start_date=fetch_start, end_date=fetch_end,
+                        frequency=frequency, adjust_flag=adjust_flag, fields=fields,
+                    )
+                    # 按月拆分并写入缓存
+                    dates = pd.to_datetime(df['date'])
+                    for (y, m), group_idx in dates.groupby([dates.dt.year, dates.dt.month]).groups.items():
+                        month_df = df.loc[group_idx].reset_index(drop=True)
+                        ttl = PERMANENT if _is_month_completed(y, m, frequency) else TTL_REALTIME
+                        k = _make_key("k_month", code=code, year=y, month=m,
+                                      frequency=frequency, adjust_flag=adjust_flag, fields=field_key)
+                        self._cache.set(k, month_df, expire=ttl)
+                        cached_chunks[(y, m)] = month_df
+                except NoDataFoundError:
+                    logger.debug(f"K线(按月) {code} {fetch_start}~{fetch_end}: 无数据")
+
+        # 3. 组装结果并按请求日期范围过滤
+        all_dfs = [cached_chunks[ym] for ym in months if ym in cached_chunks]
+        if not all_dfs:
+            raise NoDataFoundError(f"K线 {code} {start_date}~{end_date}: 查询结果为空")
+        result = pd.concat(all_dfs, ignore_index=True)
+        result = result[(result['date'] >= start_date) & (result['date'] <= end_date)]
+        return result.reset_index(drop=True)
 
     def get_stock_basic_info(self, code: str, fields: Optional[list[str]] = None) -> pd.DataFrame:
         return self._get_or_fetch(
