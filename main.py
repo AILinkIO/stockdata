@@ -35,4 +35,7 @@ if __name__ == "__main__":
     logger.info(f"正在启动 A股 MCP 服务器 (streamable-http)... 当前日期: {current_date}")
     # 以 streamable-http 模式启动，监听所有网络接口的 8000 端口
     # MCP 端点地址: http://0.0.0.0:8000/mcp
-    app.run(transport='streamable-http', host='0.0.0.0', port=8000)
+    app.run(
+        transport='streamable-http', host='0.0.0.0', port=8000,
+        uvicorn_config={"timeout_graceful_shutdown": 0},
+    )
