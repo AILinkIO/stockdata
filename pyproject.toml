@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "baostock>=0.8.9",
+    "diskcache>=5.6.3",
     "fastmcp>=3.2.0",
     "pandas>=3.0.0",
     "tabulate>=0.10.0",
