@@ -17,12 +17,28 @@ from .context import login_baostock
 
 logger = logging.getLogger(__name__)
 
-# K 线默认返回字段
-_DEFAULT_K_FIELDS = [
+# K 线默认返回字段（按频率区分）
+_DAILY_K_FIELDS = [
     "date", "code", "open", "high", "low", "close", "preclose",
     "volume", "amount", "adjustflag", "turn", "tradestatus",
     "pctChg", "peTTM", "pbMRQ", "psTTM", "pcfNcfTTM", "isST",
 ]
+_WEEKLY_MONTHLY_K_FIELDS = [
+    "date", "code", "open", "high", "low", "close",
+    "volume", "amount", "adjustflag", "turn", "pctChg",
+]
+_MINUTE_K_FIELDS = [
+    "date", "time", "code", "open", "high", "low", "close",
+    "volume", "amount", "adjustflag",
+]
+
+def _default_k_fields(frequency: str) -> list[str]:
+    """根据 K 线频率返回对应的默认字段列表。"""
+    if frequency in ("w", "m"):
+        return _WEEKLY_MONTHLY_K_FIELDS
+    if frequency in ("5", "15", "30", "60"):
+        return _MINUTE_K_FIELDS
+    return _DAILY_K_FIELDS
 
 # get_fina_indicator 聚合查询的各类别配置：(bs 查询函数, 字段前缀)
 _FINA_CATEGORIES = [
@@ -109,7 +125,7 @@ class BaostockDataSource(FinancialDataSource):
         fields: Optional[list[str]] = None,
     ) -> pd.DataFrame:
         """获取历史 K 线数据。"""
-        field_str = ",".join(fields or _DEFAULT_K_FIELDS)
+        field_str = ",".join(fields or _default_k_fields(frequency))
         return _query(
             bs.query_history_k_data_plus,
             f"K线 {code} {start_date}~{end_date}",
