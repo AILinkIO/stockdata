@@ -8,6 +8,7 @@ Baostock 内部维护全局 TCP 连接（module-level 单例），不支持并�
 
 import os
 import sys
+import time
 import atexit
 import logging
 import threading
@@ -23,14 +24,26 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-_SESSION_EXPIRED_CODE = "10001001"
+# 需要通过重连重试才能恢复的错误码
+_RETRYABLE_CODES = frozenset(
+    {
+        "10001001",  # 用户未登录
+        "10002001",  # 网络错误
+        "10002002",  # 网络连接失败
+        "10002004",  # 连接断开
+        "10002007",  # 网络接收错误
+    }
+)
 
 
-def _is_session_expired(exc: Exception) -> bool:
+def _is_retryable_error(exc: Exception) -> bool:
+    """判断异常是否可通过重连并重试来恢复。"""
+    msg = str(exc)
     return (
-        _SESSION_EXPIRED_CODE in str(exc)
-        or "login" in str(exc).lower()
-        or "未登录" in str(exc)
+        any(code in msg for code in _RETRYABLE_CODES)
+        or "login" in msg.lower()
+        or "未登录" in msg
+        or "Broken pipe" in msg
     )
 
 
@@ -90,8 +103,9 @@ def _worker_loop():
                 result_queue.put(("ok", result))
                 break
             except Exception as e:
-                if attempt == 0 and _is_session_expired(e):
-                    logger.warning("Baostock 会话失效，正在重新登录")
+                if attempt == 0 and _is_retryable_error(e):
+                    logger.warning(f"Baostock 可重试错误，正在重新登录: {e}")
+                    time.sleep(1)
                     _do_logout()
                     if _do_login():
                         continue
