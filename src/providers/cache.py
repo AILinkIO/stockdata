@@ -189,8 +189,13 @@ class CachedDataSource(FinancialDataSource):
         """获取复权因子 fingerprint，用于复权K线的缓存键。
 
         复权因子本身走缓存（历史日期永久，今天5分钟TTL）。
+        复权因子为空（股票从未有除权事件）时返回空 fingerprint，不阻断K线查询。
         """
-        adj_df = self.get_adjust_factor_data(code=code, start_date=start_date, end_date=end_date)
+        try:
+            adj_df = self.get_adjust_factor_data(code=code, start_date=start_date, end_date=end_date)
+        except Exception:
+            logger.debug(f"获取复权因子失败 {code}，使用空 fingerprint")
+            return (0, "", "")
         return _compute_adjust_fingerprint(adj_df)
 
     # ── 股票行情 ──
@@ -292,8 +297,21 @@ class CachedDataSource(FinancialDataSource):
 
     def get_adjust_factor_data(self, code: str, start_date: str, end_date: str) -> pd.DataFrame:
         ttl = PERMANENT if _is_past_date(end_date) else TTL_REALTIME
-        return self._get_or_fetch("get_adjust_factor_data", ttl,
-                                  code=code, start_date=start_date, end_date=end_date)
+        key = _make_key("get_adjust_factor_data", code=code, start_date=start_date, end_date=end_date)
+        cached = self._cache.get(key)
+        if cached is not None:
+            logger.debug("缓存命中: get_adjust_factor_data")
+            return cached
+        try:
+            df = self._delegate.get_adjust_factor_data(
+                code=code, start_date=start_date, end_date=end_date,
+            )
+        except NoDataFoundError:
+            # 无复权因子是合法状态（股票从未有除权事件），缓存空结果防止穿透
+            df = pd.DataFrame()
+            logger.debug(f"复权因子 {code} {start_date}~{end_date}: 无数据，缓存空结果")
+        self._cache.set(key, df, expire=ttl)
+        return df
 
     # ── 财务报表 ──
 
