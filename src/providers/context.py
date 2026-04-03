@@ -1,32 +1,41 @@
 """
 Baostock 会话管理模块。
 
-维护一个持久的 Baostock 登录会话，首次使用时自动登录，进程退出时登出。
-遇到会话失效（如"用户未登录"）时可通过 relogin() 重新建立连接。
+使用请求队列 + 后台 worker 线程串行化所有 baostock 操作。
 
-Baostock 内部维护全局 TCP 连接，不支持并发访问。
-通过互斥锁确保同一时间只有一个线程使用 baostock。
+Baostock 内部维护全局 TCP 连接（module-level 单例），不支持并发访问。
 """
+
 import os
 import sys
 import atexit
 import logging
 import threading
+import queue
 from contextlib import contextmanager
+from typing import Any, Callable, TypeVar
 
 import baostock as bs
 
-from .interface import LoginError
+from .interface import DataSourceError
 
 logger = logging.getLogger(__name__)
 
-_lock = threading.Lock()
-_logged_in = False
+T = TypeVar("T")
+
+_SESSION_EXPIRED_CODE = "10001001"
+
+
+def _is_session_expired(exc: Exception) -> bool:
+    return (
+        _SESSION_EXPIRED_CODE in str(exc)
+        or "login" in str(exc).lower()
+        or "未登录" in str(exc)
+    )
 
 
 @contextmanager
 def _suppress_stdout():
-    """临时将 stdout 重定向到 /dev/null，抑制第三方库的控制台输出。"""
     original_fd = sys.stdout.fileno()
     saved_fd = os.dup(original_fd)
     devnull_fd = os.open(os.devnull, os.O_WRONLY)
@@ -39,53 +48,103 @@ def _suppress_stdout():
         os.close(saved_fd)
 
 
-def _do_login():
-    """执行 baostock 登录，失败时抛出 LoginError。调用方须持有 _lock。"""
-    global _logged_in
+def _do_login() -> bool:
     with _suppress_stdout():
         lg = bs.login()
-    if lg.error_code != '0':
-        raise LoginError(f"Baostock login failed: {lg.error_msg}")
-    _logged_in = True
+    if lg.error_code != "0":
+        logger.error(f"Baostock 登录失败: {lg.error_msg}")
+        return False
     logger.debug("Baostock 登录成功")
+    return True
+
+
+def _do_logout():
+    with _suppress_stdout():
+        bs.logout()
+    logger.debug("Baostock 登出成功")
+
+
+_request_queue: queue.Queue = queue.Queue()
+_worker_thread: threading.Thread | None = None
+_shutdown_event = threading.Event()
+
+
+def _worker_loop():
+    logger.info("Baostock worker 线程启动")
+
+    if not _do_login():
+        logger.error("Baostock worker 初始登录失败，worker 退出")
+        return
+
+    logger.info("Baostock worker 就绪，开始处理请求队列")
+
+    while not _shutdown_event.is_set():
+        try:
+            work, result_queue = _request_queue.get(timeout=1.0)
+        except queue.Empty:
+            continue
+
+        for attempt in range(2):
+            try:
+                result = work()
+                result_queue.put(("ok", result))
+                break
+            except Exception as e:
+                if attempt == 0 and _is_session_expired(e):
+                    logger.warning("Baostock 会话失效，正在重新登录")
+                    _do_logout()
+                    if _do_login():
+                        continue
+                result_queue.put(("err", e))
+                break
+
+        _request_queue.task_done()
+
+
+def _start_worker():
+    global _worker_thread
+    if _worker_thread is not None and _worker_thread.is_alive():
+        return
+    _shutdown_event.clear()
+    _worker_thread = threading.Thread(
+        target=_worker_loop, daemon=True, name="baostock-worker"
+    )
+    _worker_thread.start()
+
+
+def execute(work: Callable[[], T]) -> T:
+    """提交 callable 到请求队列，阻塞等待结果。
+
+    所有 baostock 操作必须通过此函数提交。
+    """
+    _start_worker()
+
+    result_queue: queue.Queue = queue.Queue()
+    _request_queue.put((work, result_queue))
+    status, value = result_queue.get()
+
+    if status == "err":
+        raise value
+    return value
 
 
 @contextmanager
 def baostock_session():
-    """Baostock 会话上下文管理器。
-
-    使用方式::
-
-        with baostock_session():
-            rs = bs.query_history_k_data_plus(...)
-
-    首次调用时自动登录，之后复用会话。通过互斥锁串行化所有 baostock 操作。
-    如遇会话失效，在 with 块内调用 relogin() 重新连接。
-    """
-    with _lock:
-        if not _logged_in:
-            _do_login()
-        yield
+    yield
 
 
 def relogin():
-    """强制重新登录。必须在 baostock_session() 内调用（已持有锁）。"""
-    global _logged_in
-    if _logged_in:
-        with _suppress_stdout():
-            bs.logout()
-        _logged_in = False
-    _do_login()
+    pass
 
 
 def _shutdown():
-    """进程退出时登出 baostock。"""
-    global _logged_in
-    if _logged_in:
-        with _suppress_stdout():
-            bs.logout()
-        _logged_in = False
-        logger.debug("Baostock 登出成功")
+    _shutdown_event.set()
+    if _worker_thread is not None and _worker_thread.is_alive():
+        _worker_thread.join(timeout=5)
+    try:
+        _do_logout()
+    except Exception:
+        pass
 
 
 atexit.register(_shutdown)
