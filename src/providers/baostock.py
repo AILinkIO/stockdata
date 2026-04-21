@@ -137,26 +137,30 @@ def _query(bs_func, description: str, **kwargs) -> pd.DataFrame:
         raise DataSourceError(f"{description}: 未预期错误 - {e}") from e
 
 
-def _query_fina_category(
-    bs_func, prefix: str, code: str, year: str, quarter: int
-) -> dict:
-    """查询单个财务指标类别，返回带前缀的字段字典。查询失败时返回空字典。"""
+def _query_all_fina_categories(code: str, year: str, quarter: int) -> dict:
+    """一次 execute() 调用内完成 6 类财务指标的批量查询，减少排队次数。
+
+    将 6 次 execute() 提交合并为 1 次，显著降低 MCP 工具调用的排队等待时间。
+    单个类别查询失败不影响其他类别（返回空字典，由调用方过滤）。
+    """
+    def _do_query():
+        record: dict = {}
+        for bs_func, prefix in _FINA_CATEGORIES:
+            try:
+                rs = bs_func(code=code, year=year, quarter=quarter)
+                if rs.error_code == "0" and rs.next():
+                    row = rs.get_row_data()
+                    for i, field in enumerate(rs.fields):
+                        if i < len(row):
+                            record[f"{prefix}_{field}"] = row[i]
+            except Exception as e:
+                logger.debug(f"获取 {prefix} 数据失败 ({code} {year}Q{quarter}): {e}")
+        return record
+
     try:
-
-        def _do_query():
-            rs = bs_func(code=code, year=year, quarter=quarter)
-            if rs.error_code != "0" or not rs.next():
-                return {}
-            row = rs.get_row_data()
-            return {
-                f"{prefix}_{field}": row[i]
-                for i, field in enumerate(rs.fields)
-                if i < len(row)
-            }
-
         return execute(_do_query)
     except Exception as e:
-        logger.debug(f"获取 {prefix} 数据失败 ({code} {year}Q{quarter}): {e}")
+        logger.warning(f"批量查询财务指标失败 ({code} {year}Q{quarter}): {e}")
         return {}
 
 
@@ -351,11 +355,8 @@ class BaostockDataSource(FinancialDataSource):
 
     @staticmethod
     def _build_quarter_record(code: str, year: str, quarter: int) -> dict | None:
-        """构建单个季度的聚合财务指标记录，无数据时返回 None。"""
         record = {"code": code, "year": year, "quarter": quarter}
-        for bs_func, prefix in _FINA_CATEGORIES:
-            record.update(_query_fina_category(bs_func, prefix, code, year, quarter))
-        # 仅当除 code/year/quarter 外还有实际数据字段时才返回
+        record.update(_query_all_fina_categories(code, year, quarter))
         if len(record) <= 3:
             return None
         return record

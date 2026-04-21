@@ -405,17 +405,51 @@ class CachedDataSource(FinancialDataSource):
         return df
 
     def _build_fina_quarter(self, code: str, year: str, quarter: int) -> dict | None:
-        """从缓存层的按季度方法组装一条聚合财务指标记录。"""
         record: dict = {"code": code, "year": year, "quarter": quarter}
+
+        # 检查该季度各分类的缓存命中情况
+        all_cached = True
         for method_name, prefix in _FINA_CATEGORY_METHODS:
-            try:
-                df = getattr(self, method_name)(code=code, year=year, quarter=quarter)
-                if df is not None and not df.empty:
-                    row = df.iloc[0]
-                    for col in df.columns:
+            key = _make_key(method_name, code=code, year=year, quarter=quarter)
+            cached = self._cache.get(key)
+            if cached is not None:
+                if not cached.empty:
+                    row = cached.iloc[0]
+                    for col in cached.columns:
                         record[f"{prefix}_{col}"] = row[col]
-            except Exception:
-                pass  # 单类别失败不影响其他类别，与原逻辑一致
+            else:
+                all_cached = False
+
+        if all_cached:
+            if len(record) <= 3:
+                return None
+            return record
+
+        # 缓存不完全命中 → 通过底层批量查询一次补齐所有缺失数据
+        from .baostock import _query_all_fina_categories
+        try:
+            extra = _query_all_fina_categories(code, year, quarter)
+        except Exception:
+            extra = {}
+
+        if extra:
+            for k, v in extra.items():
+                if k not in record:
+                    record[k] = v
+
+            # 将新获取的各分类数据回填到各自的季度缓存中
+            ttl = self._quarterly_ttl(year, quarter)
+            for method_name, prefix in _FINA_CATEGORY_METHODS:
+                sub_cols = {
+                    col.replace(f"{prefix}_", ""): val
+                    for col, val in extra.items()
+                    if col.startswith(f"{prefix}_")
+                }
+                if sub_cols:
+                    sub_df = pd.DataFrame([sub_cols])
+                    sub_key = _make_key(method_name, code=code, year=year, quarter=quarter)
+                    self._cache.set(sub_key, sub_df, expire=ttl)
+
         if len(record) <= 3:
             return None
         return record
