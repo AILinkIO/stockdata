@@ -3,7 +3,7 @@ name = "stockdata"
 version = "0.1.0"
 description = "stock data mcp"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 dependencies = [
     "baostock>=0.8.9",
     "diskcache>=5.6.3",
