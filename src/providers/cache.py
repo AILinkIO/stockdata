@@ -188,15 +188,26 @@ class CachedDataSource(FinancialDataSource):
     def _get_adjust_fingerprint(self, code: str, start_date: str, end_date: str) -> tuple:
         """获取复权因子 fingerprint，用于复权K线的缓存键。
 
-        复权因子本身走缓存（历史日期永久，今天5分钟TTL）。
-        复权因子为空（股票从未有除权事件）时返回空 fingerprint，不阻断K线查询。
+        fingerprint 单独缓存，避免每次调整K线请求都反序列化完整复权因子 DataFrame。
+        缓存 TTL 与复权因子数据一致（历史日期永久，今天5分钟）。
         """
+        fp_key = _make_key("_adjust_fp", code=code, start_date=start_date, end_date=end_date)
+        cached_fp = self._cache.get(fp_key)
+        if cached_fp is not None:
+            return cached_fp
+
         try:
             adj_df = self.get_adjust_factor_data(code=code, start_date=start_date, end_date=end_date)
         except Exception:
             logger.debug(f"获取复权因子失败 {code}，使用空 fingerprint")
-            return (0, "", "")
-        return _compute_adjust_fingerprint(adj_df)
+            fp = (0, "", "")
+            self._cache.set(fp_key, fp, expire=TTL_REALTIME)
+            return fp
+
+        fp = _compute_adjust_fingerprint(adj_df)
+        ttl = PERMANENT if _is_past_date(end_date) else TTL_REALTIME
+        self._cache.set(fp_key, fp, expire=ttl)
+        return fp
 
     # ── 股票行情 ──
 
