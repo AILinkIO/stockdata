@@ -14,7 +14,7 @@ import logging
 import threading
 import queue
 from contextlib import contextmanager
-from typing import Any, Callable, TypeVar
+from typing import Callable, TypeVar
 
 import baostock as bs
 
@@ -23,6 +23,9 @@ from .interface import DataSourceError
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+_REQUEST_TIMEOUT = 60  # execute() 等待 worker 响应的超时秒数
+_WORKER_SHUTDOWN_JOIN = 5  # 关闭时等待 worker 退出的秒数
 
 # 需要通过重连重试才能恢复的错误码
 _RETRYABLE_CODES = frozenset(
@@ -37,7 +40,6 @@ _RETRYABLE_CODES = frozenset(
 
 
 def _is_retryable_error(exc: Exception) -> bool:
-    """判断异常是否可通过重连并重试来恢复。"""
     msg = str(exc)
     return (
         any(code in msg for code in _RETRYABLE_CODES)
@@ -65,7 +67,7 @@ def _do_login() -> bool:
     with _suppress_stdout():
         lg = bs.login()
     if lg.error_code != "0":
-        logger.error(f"Baostock 登录失败: {lg.error_msg}")
+        logger.error("Baostock 登录失败: %s", lg.error_msg)
         return False
     logger.debug("Baostock 登录成功")
     return True
@@ -79,6 +81,7 @@ def _do_logout():
 
 _request_queue: queue.Queue = queue.Queue()
 _worker_thread: threading.Thread | None = None
+_worker_ready = threading.Event()
 _shutdown_event = threading.Event()
 
 
@@ -89,6 +92,7 @@ def _worker_loop():
         logger.error("Baostock worker 初始登录失败，worker 退出")
         return
 
+    _worker_ready.set()
     logger.info("Baostock worker 就绪，开始处理请求队列")
 
     while not _shutdown_event.is_set():
@@ -104,7 +108,7 @@ def _worker_loop():
                 break
             except Exception as e:
                 if attempt == 0 and _is_retryable_error(e):
-                    logger.warning(f"Baostock 可重试错误，正在重新登录: {e}")
+                    logger.warning("Baostock 可重试错误，正在重新登录: %s", e)
                     time.sleep(1)
                     _do_logout()
                     if _do_login():
@@ -119,6 +123,7 @@ def _start_worker():
     global _worker_thread
     if _worker_thread is not None and _worker_thread.is_alive():
         return
+    _worker_ready.clear()
     _shutdown_event.clear()
     _worker_thread = threading.Thread(
         target=_worker_loop, daemon=True, name="baostock-worker"
@@ -135,26 +140,23 @@ def execute(work: Callable[[], T]) -> T:
 
     result_queue: queue.Queue = queue.Queue()
     _request_queue.put((work, result_queue))
-    status, value = result_queue.get()
+
+    try:
+        status, value = result_queue.get(timeout=_REQUEST_TIMEOUT)
+    except queue.Empty:
+        raise DataSourceError(
+            f"Baostock 请求超时（{_REQUEST_TIMEOUT}s），worker 线程可能已异常退出"
+        )
 
     if status == "err":
         raise value
     return value
 
 
-@contextmanager
-def baostock_session():
-    yield
-
-
-def relogin():
-    pass
-
-
 def _shutdown():
     _shutdown_event.set()
     if _worker_thread is not None and _worker_thread.is_alive():
-        _worker_thread.join(timeout=5)
+        _worker_thread.join(timeout=_WORKER_SHUTDOWN_JOIN)
     try:
         _do_logout()
     except Exception:
