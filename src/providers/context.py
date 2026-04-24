@@ -26,8 +26,8 @@ T = TypeVar("T")
 
 _REQUEST_TIMEOUT = 60  # execute() 等待 worker 响应的超时秒数
 _WORKER_SHUTDOWN_JOIN = 5  # 关闭时等待 worker 退出的秒数
-_INITIAL_LOGIN_RETRIES = 3  # worker 启动时初始登录的重试次数
-_INITIAL_LOGIN_BACKOFF = 3  # 初始登录重试的退避秒数
+_LOGIN_BACKOFF_INITIAL = 3  # 登录失败后首次退避秒数
+_LOGIN_BACKOFF_MAX = 60  # 登录退避秒数上限（指数增长到此为止）
 
 # 需要通过重连重试才能恢复的错误码
 _RETRYABLE_CODES = frozenset(
@@ -88,56 +88,67 @@ _shutdown_event = threading.Event()
 
 
 def _worker_loop():
+    """Worker 线程主循环，常驻运行直至 shutdown。
+
+    登录是线程的一个内部状态：失败时按指数退避重试，**线程永不因登录失败而退出**。
+    """
     logger.info("Baostock worker 线程启动")
-
-    for attempt in range(1, _INITIAL_LOGIN_RETRIES + 1):
-        if _shutdown_event.is_set():
-            logger.info("Baostock worker 在初始登录前收到关闭信号，退出")
-            return
-        if _do_login():
-            break
-        if attempt < _INITIAL_LOGIN_RETRIES:
-            logger.warning(
-                "Baostock 初始登录失败，%ss 后重试（%d/%d）",
-                _INITIAL_LOGIN_BACKOFF,
-                attempt,
-                _INITIAL_LOGIN_RETRIES,
-            )
-            if _shutdown_event.wait(_INITIAL_LOGIN_BACKOFF):
-                logger.info("Baostock worker 在重试等待期间收到关闭信号，退出")
-                return
-    else:
-        logger.error(
-            "Baostock worker 初始登录失败（已重试 %d 次），worker 退出",
-            _INITIAL_LOGIN_RETRIES,
-        )
-        return
-
-    _worker_ready.set()
-    logger.info("Baostock worker 就绪，开始处理请求队列")
+    logged_in = False
+    login_backoff = _LOGIN_BACKOFF_INITIAL
 
     while not _shutdown_event.is_set():
+        if not logged_in:
+            if _do_login():
+                logged_in = True
+                login_backoff = _LOGIN_BACKOFF_INITIAL
+                _worker_ready.set()
+                logger.info("Baostock 已登录，worker 就绪")
+            else:
+                _worker_ready.clear()
+                logger.warning("Baostock 登录失败，%ss 后重试", login_backoff)
+                if _shutdown_event.wait(login_backoff):
+                    break
+                login_backoff = min(login_backoff * 2, _LOGIN_BACKOFF_MAX)
+                continue
+
         try:
             work, result_queue = _request_queue.get(timeout=1.0)
         except queue.Empty:
             continue
 
-        for attempt in range(2):
-            try:
-                result = work()
-                result_queue.put(("ok", result))
-                break
-            except Exception as e:
-                if attempt == 0 and _is_retryable_error(e):
-                    logger.warning("Baostock 可重试错误，正在重新登录: %s", e)
-                    time.sleep(1)
+        try:
+            result_queue.put(("ok", work()))
+        except Exception as e:
+            if _is_retryable_error(e):
+                logger.warning("Baostock 可重试错误，重新登录后重试一次: %s", e)
+                try:
                     _do_logout()
-                    if _do_login():
-                        continue
+                except Exception:
+                    pass
+                logged_in = False
+                _worker_ready.clear()
+                time.sleep(1)
+                if _do_login():
+                    logged_in = True
+                    login_backoff = _LOGIN_BACKOFF_INITIAL
+                    _worker_ready.set()
+                    try:
+                        result_queue.put(("ok", work()))
+                    except Exception as e2:
+                        result_queue.put(("err", e2))
+                else:
+                    # 重登未成功：当前请求返回错误，外层循环会按退避继续尝试登录
+                    result_queue.put(("err", e))
+            else:
                 result_queue.put(("err", e))
-                break
+        finally:
+            _request_queue.task_done()
 
-        _request_queue.task_done()
+    try:
+        _do_logout()
+    except Exception:
+        pass
+    logger.info("Baostock worker 线程退出")
 
 
 def _start_worker():
