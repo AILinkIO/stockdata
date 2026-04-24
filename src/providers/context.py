@@ -26,6 +26,8 @@ T = TypeVar("T")
 
 _REQUEST_TIMEOUT = 60  # execute() 等待 worker 响应的超时秒数
 _WORKER_SHUTDOWN_JOIN = 5  # 关闭时等待 worker 退出的秒数
+_INITIAL_LOGIN_RETRIES = 3  # worker 启动时初始登录的重试次数
+_INITIAL_LOGIN_BACKOFF = 3  # 初始登录重试的退避秒数
 
 # 需要通过重连重试才能恢复的错误码
 _RETRYABLE_CODES = frozenset(
@@ -88,8 +90,27 @@ _shutdown_event = threading.Event()
 def _worker_loop():
     logger.info("Baostock worker 线程启动")
 
-    if not _do_login():
-        logger.error("Baostock worker 初始登录失败，worker 退出")
+    for attempt in range(1, _INITIAL_LOGIN_RETRIES + 1):
+        if _shutdown_event.is_set():
+            logger.info("Baostock worker 在初始登录前收到关闭信号，退出")
+            return
+        if _do_login():
+            break
+        if attempt < _INITIAL_LOGIN_RETRIES:
+            logger.warning(
+                "Baostock 初始登录失败，%ss 后重试（%d/%d）",
+                _INITIAL_LOGIN_BACKOFF,
+                attempt,
+                _INITIAL_LOGIN_RETRIES,
+            )
+            if _shutdown_event.wait(_INITIAL_LOGIN_BACKOFF):
+                logger.info("Baostock worker 在重试等待期间收到关闭信号，退出")
+                return
+    else:
+        logger.error(
+            "Baostock worker 初始登录失败（已重试 %d 次），worker 退出",
+            _INITIAL_LOGIN_RETRIES,
+        )
         return
 
     _worker_ready.set()

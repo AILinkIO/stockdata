@@ -5,7 +5,7 @@ description = "stock data mcp"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "baostock>=0.8.9",
+    "baostock>=0.9.1",
     "diskcache>=5.6.3",
     "fastmcp>=3.2.0",
     "pandas>=3.0.0",
