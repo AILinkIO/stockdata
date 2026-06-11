@@ -6,7 +6,7 @@
 """
 
 from bisect import bisect_right
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -94,7 +94,9 @@ def get_kline_minute(code: str, start: date, end: date, frequency: int = 30) -> 
         rows = s.scalars(
             select(KlineMinute)
             .where(KlineMinute.code == code, KlineMinute.frequency == frequency,
-                   KlineMinute.bar_time >= start, KlineMinute.bar_time <= end)
+                   # date 与 timestamptz 比较：end 当天 00:00 之后的 bar 也属于 end 日，右开区间
+                   KlineMinute.bar_time >= start,
+                   KlineMinute.bar_time < end + timedelta(days=1))
             .order_by(KlineMinute.bar_time)
         ).all()
     return [_row_dict(r, _KM_COLS) for r in rows]
