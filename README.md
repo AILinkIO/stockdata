@@ -16,8 +16,9 @@ FastAPI 对外提供 REST 接口。
 - **日期工具** — 最新交易日、交易日判断、前后交易日
 - **分析报告** — 个股基本面 / 技术面 / 综合分析（Markdown）
 
-数据按需抓取（读穿透：缺数据时自动投递抓取任务并等待），辅以每日定时同步
-（交易日历、股票列表、指数成分股、行业分类）。
+数据按需抓取（读穿透：缺数据时自动投递抓取任务并等待），辅以每日定时同步：
+交易日历、股票列表、指数成分股、行业分类，以及**已入库代码的交易信息增量同步**
+（每交易日收盘后遍历水位表，对所有跟踪中的标的补抓 K 线/复权因子到当日）。
 
 ## 架构
 
@@ -51,20 +52,21 @@ uv sync
 # 初始化数据库
 uv run alembic upgrade head
 
-# 启动（三个进程）
-uv run celery -A fetcher.app worker --loglevel=info   # 抓取 worker
+# 启动（分片 worker × N + beat + API）
+# 同 code 同任务类型恒定路由到同一分片（单进程），天然串行并复用连接
+uv run celery -A fetcher.app worker -Q shard0 -n shard0@%h -c 1 --loglevel=info
+uv run celery -A fetcher.app worker -Q shard1 -n shard1@%h -c 1 --loglevel=info
+uv run celery -A fetcher.app worker -Q shard2 -n shard2@%h -c 1 --loglevel=info
 uv run celery -A fetcher.app beat --loglevel=info     # 定时同步
 uv run uvicorn api.main:app --host 0.0.0.0 --port 8000  # API
 
-# 部署：systemd 单元见 deploy/
+# 部署：systemd 单元见 deploy/（fetcher 为模板单元 stockdata-fetcher@{0..2}）
 ```
 
 接口文档：<http://localhost:8000/docs>
 
-```bash
-# 可选：MCP 薄壳（供 LLM 接入，纯转发 REST API，工具面与旧版兼容）
-uv run --group mcp python -m mcp_shim.main   # http://0.0.0.0:8001/mcp
-```
+数据获取与任务提交均通过 REST：数据端点自带读穿透（缺数据自动抓取），
+批量回填走 `POST /api/v1/tasks/backfill`（202 + task_id 轮询）。
 
 ```bash
 # 示例
@@ -92,7 +94,6 @@ db/
 ├── coverage.py       # 覆盖度/新鲜度规则
 └── alembic/          # schema 迁移
 core/                 # 代码标准化等纯逻辑
-mcp_shim/             # MCP 薄壳（fastmcp 依赖在独立 mcp 组，与主体解耦）
 deploy/               # systemd 单元
 scripts/              # smoke_celery.py（部署验证）、parity_check.py（历史对照）
 ```

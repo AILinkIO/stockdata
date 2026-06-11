@@ -20,8 +20,9 @@ class Settings(BaseSettings):
     broker_url: str = "redis://127.0.0.1:6379/2"
     result_backend: str = "redis://127.0.0.1:6379/3"
 
-    # ── fetcher 子进程生命周期（见设计文档 4.1 节） ──
-    worker_concurrency: int = 3        # 子进程数，baostock 服务端是串行瓶颈，2~4 足够
+    # ── fetcher 子进程生命周期（见设计文档 4.1 节 / 实施偏差 11） ──
+    worker_shards: int = 3             # 分片队列数：同 code 同任务类型恒定路由到同一分片
+    worker_concurrency: int = 1        # 每个分片 worker 的子进程数；亲和性要求恒为 1
     worker_max_tasks_per_child: int = 20  # 处理 N 个任务后杀死回收子进程（=1 即一任务一进程）
     task_time_limit: int = 90          # 硬超时：SIGKILL 子进程
     task_soft_time_limit: int = 60     # 软超时：先抛异常给任务清理机会

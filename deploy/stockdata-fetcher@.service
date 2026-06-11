@@ -1,5 +1,5 @@
 [Unit]
-Description=stockdata fetcher (Celery worker, prefork)
+Description=stockdata fetcher 分片 worker shard%i（Celery，单进程，同 code 同类型任务亲和）
 Requires=postgresql.service valkey.service
 After=network.target postgresql.service valkey.service
 
@@ -7,7 +7,7 @@ After=network.target postgresql.service valkey.service
 Type=exec
 User=david
 WorkingDirectory=/home/david/workspace/stockdata
-ExecStart=/usr/bin/env uv run celery -A fetcher.app worker --loglevel=info
+ExecStart=/usr/bin/env uv run celery -A fetcher.app worker -Q shard%i -n shard%i@%%h -c 1 --loglevel=info
 # Celery 优雅退出：等待在执行的任务完成（最长至 task_time_limit）
 TimeoutStopSec=120
 Restart=on-failure
@@ -15,3 +15,6 @@ RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
+
+# 启用方式（分片数 = settings.worker_shards，默认 3）:
+#   systemctl enable --now stockdata-fetcher@{0..2}

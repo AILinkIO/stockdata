@@ -1,11 +1,18 @@
 """
 Celery 应用实例与子进程生命周期配置（设计文档 4.1 节）。
 
-启动 worker（项目根目录）:
-    uv run celery -A fetcher.app worker --loglevel=info
+队列按 crc32(任务名:code) 分片：同 code 同任务类型的任务恒定路由到同一分片，
+每个分片由一个单进程 worker 消费——同 code 同类型天然串行（不会被两个进程
+并发抓取），且复用该进程的 baostock 连接。
+
+启动 worker（项目根目录，每个分片一个，shard 编号 0 ~ worker_shards-1）:
+    uv run celery -A fetcher.app worker -Q shard0 -n shard0@%h -c 1 --loglevel=info
+    uv run celery -A fetcher.app worker -Q shard1 -n shard1@%h -c 1 --loglevel=info
+    uv run celery -A fetcher.app worker -Q shard2 -n shard2@%h -c 1 --loglevel=info
 """
 
 import logging
+import zlib
 
 from celery import Celery
 from celery.signals import worker_process_init, worker_process_shutdown
@@ -13,6 +20,16 @@ from celery.signals import worker_process_init, worker_process_shutdown
 from settings import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _route_task(name, args, kwargs, options, task=None, **kw):
+    """分片路由：亲和键取 code（或 index_code/kind），无 code 的任务按类型聚合。"""
+    if not name.startswith("fetcher."):
+        return None
+    k = kwargs or {}
+    affinity = k.get("code") or k.get("index_code") or k.get("kind") or ""
+    shard = zlib.crc32(f"{name}:{affinity}".encode()) % settings.worker_shards
+    return {"queue": f"shard{shard}"}
 
 app = Celery(
     "stockdata",
@@ -22,6 +39,9 @@ app = Celery(
 )
 
 app.conf.update(
+    # 分片路由（亲和性，见模块 docstring）
+    task_routes=(_route_task,),
+    task_default_queue="shard0",
     # 子进程生命周期
     worker_concurrency=settings.worker_concurrency,
     worker_max_tasks_per_child=settings.worker_max_tasks_per_child,
@@ -55,6 +75,10 @@ app.conf.beat_schedule = {
     "sync-market-after-close": {
         "task": "fetcher.beat.sync_market",
         "schedule": crontab(hour=17, minute=0, day_of_week="1-5"),
+    },
+    "sync-tracked-codes-after-close": {
+        "task": "fetcher.beat.sync_tracked_codes",
+        "schedule": crontab(hour=17, minute=10, day_of_week="1-5"),
     },
 }
 

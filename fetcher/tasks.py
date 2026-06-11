@@ -317,9 +317,10 @@ def _macro_dates(kind: str, start_date: str, end_date: str) -> tuple[date, date]
 
 
 @app.task(name="fetcher.debug_probe", bind=True)
-def debug_probe(self, sleep_seconds: int = 0) -> dict:
+def debug_probe(self, sleep_seconds: int = 0, code: str = "") -> dict:
     """部署验证探针：sleep_seconds>0 时模拟挂死（无视软超时，逼出 SIGKILL 路径）；
-    返回子进程 PID 用于观察 max_tasks_per_child 回收。不触碰 baostock 与数据库。"""
+    返回子进程 PID 用于观察 max_tasks_per_child 回收与分片亲和（code 参与路由）。
+    不触碰 baostock 与数据库。"""
     import os
     import time
 
@@ -329,7 +330,7 @@ def debug_probe(self, sleep_seconds: int = 0) -> dict:
         time.sleep(sleep_seconds)
     except SoftTimeLimitExceeded:
         time.sleep(sleep_seconds)
-    return {"pid": os.getpid()}
+    return {"pid": os.getpid(), "code": code}
 
 
 @app.task(name="fetcher.fetch_macro", **_TASK_OPTS)

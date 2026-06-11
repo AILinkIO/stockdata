@@ -592,6 +592,15 @@ stockdata/
 9. **复权公式（实测确认）**：bar 复权价 = 不复权价 × 因子，因子取除权日 ≤ bar
    日期的最近一次事件（前复权用 fore、后复权用 back），首个事件之前因子为 1。
    与 baostock 输出逐位一致。
-10. **阶段 7 已实施**：`mcp_shim/`，38 个工具，名称与参数兼容旧版（原
-    format/markdown 参数移除，统一返回 JSON 文本）；fastmcp 依赖隔离在
-    `mcp` 依赖组，监听 8001。
+10. **阶段 7（MCP 薄壳）曾实施后又移除**：实施记录见 commit `8eee679`，
+    后经决策（2026-06-11）彻底去 MCP 化——任务提交与数据获取统一走 REST
+    （读穿透 + `/api/v1/tasks/backfill`）。如需找回薄壳实现，检出该 commit。
+11. **队列分片亲和（2026-06-11 新增需求）**：任务按 `crc32(任务名:code) % worker_shards`
+    路由到分片队列，每个分片由一个单进程 worker（`-Q shardN -c 1`）消费——
+    同 code 同任务类型恒定落在同一进程，天然串行（不会被并发抓取）并复用该进程的
+    baostock 连接。进程身份在 max_tasks_per_child 回收时轮换，但亲和与串行保证不变。
+    代价：某分片上的长任务会阻塞同分片其他 code，分片数可经 `STOCKDATA_WORKER_SHARDS`
+    扩展（需同步增加 worker 实例）。systemd 用模板单元 `stockdata-fetcher@{0..N-1}`。
+12. **已入库代码定时同步（同日新增）**：beat 任务 `sync_tracked_codes`（每交易日
+    17:10）遍历 data_watermark 中的 K线/因子水位，对每个 (code, 类型) 投递
+    `last_date → 今天` 的增量抓取（含 last_date 当日，覆写盘中写入的未收盘 bar）。
