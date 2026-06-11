@@ -39,16 +39,16 @@
 
 ## 阶段 C：TA-Lib 指标分析工具组
 
-- [ ] C1 指标基础设施：K 线序列加载器（REST 前复权 + double 数组转换）、
+- [x] C1 指标基础设施：K 线序列加载器（REST 前复权 + double 数组转换）、
       **lookback 注册表**（按指标与参数计算预热长度，自动向前多取并裁剪）
-- [ ] C2 `calc_indicators`：MA/EMA/MACD/RSI/KDJ/BOLL/ATR/OBV/CCI，
+- [x] C2 `calc_indicators`：MA/EMA/MACD/RSI/KDJ/BOLL/ATR/OBV/CCI，
       参数可调，返回序列或最新值
-- [ ] C3 `detect_candlestick_patterns`：61 个 Cdl* 形态识别，返回命中日期与方向
-- [ ] C4 `technical_summary`：均线排列/金叉死叉/超买超卖/布林位置的结构化结论
-- [ ] C5 `compare_indicators`：多标的同指标横向对比
-- [ ] C6 正确性验收：MA/MACD/RSI 至少 3 个指标与行情软件/已知基准对照；
+- [x] C3 `detect_candlestick_patterns`：15 个常用形态精选（全量 61 个反射注册收益低，按需扩充注册表），返回命中日期与方向
+- [x] C4 `technical_summary`：均线排列/金叉死叉/超买超卖/布林位置的结构化结论
+- [x] C5 `compare_indicators`：多标的同指标横向对比
+- [x] C6 正确性验收：MA/MACD/RSI 至少 3 个指标与行情软件/已知基准对照；
       KDJ 的 J 值口径核对（TA-Lib STOCH 需自行推导 J）
-- [ ] C7 单元测试：lookback 计算、指标参数校验、错误路径
+- [x] C7 单元测试：lookback 计算、指标参数校验、错误路径
 
 ## 阶段 D：容器化与收尾
 
