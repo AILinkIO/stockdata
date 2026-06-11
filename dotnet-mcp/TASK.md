@@ -22,19 +22,19 @@
 
 ## 阶段 B：透传工具组（28 个，名称与旧 Python MCP 兼容）
 
-- [ ] B1 行情：get_historical_k_data（含分钟线分流）、get_stock_basic_info、
+- [x] B1 行情：get_historical_k_data（含分钟线分流）、get_stock_basic_info、
       get_dividend_data、get_adjust_factor_data
-- [ ] B2 财报：get_profit/operation/growth/balance/cash_flow/dupont_data、
+- [x] B2 财报：get_profit/operation/growth/balance/cash_flow/dupont_data、
       get_performance_express_report、get_forecast_report、get_fina_indicator
-- [ ] B3 指数与行业：get_index_constituents、get_sz50/hs300/zz500_stocks、
+- [x] B3 指数与行业：get_index_constituents、get_sz50/hs300/zz500_stocks、
       get_stock_industry、list_industries、get_industry_members
-- [ ] B4 市场与宏观：get_trade_dates、get_all_stock、search_stocks、
+- [x] B4 市场与宏观：get_trade_dates、get_all_stock、search_stocks、
       get_suspensions、get_deposit_rate_data、get_loan_rate_data、
       get_required_reserve_ratio_data、get_money_supply_data_month/year
-- [ ] B5 日期与工具：is_trading_day、previous/next_trading_day、
+- [x] B5 日期与工具：is_trading_day、previous/next_trading_day、
       get_last_n_trading_days、get_recent_trading_range、normalize_stock_code、
       normalize_index_code、get_stock_analysis
-- [ ] B6 验收：tools/list 数量与签名对照旧 mcp_shim 清单（commit 8eee679）；
+- [x] B6 验收：tools/list 数量与签名对照旧 mcp_shim 清单（commit 8eee679）；
       抽查 K 线/财报/宏观各 1 个工具的真实调用
 
 ## 阶段 C：TA-Lib 指标分析工具组
