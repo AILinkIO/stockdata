@@ -2,6 +2,8 @@
 
 > 状态：已实施完成（含可选阶段 7 MCP 薄壳）。旧实现见 tag `pre-restructure`
 > 关联文档：
+> - [api.md](api.md) —— API 接口参考
+> - [data-lifecycle.md](data-lifecycle.md) —— 数据生命周期（读穿透、缺口补抓、复权处理的运行时行为）
 > - [migration-plan.md](migration-plan.md) —— 迁移实施计划（各阶段任务清单、验收标准、回滚预案）
 > - [cache-strategy.md](cache-strategy.md) —— 旧缓存策略，本文档 5.4 节为其 PostgreSQL 化映射，迁移完成后归档
 

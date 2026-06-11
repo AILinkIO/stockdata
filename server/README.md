@@ -4,7 +4,7 @@
 PostgreSQL 做数据仓库，Celery（Redis broker）+ 多进程任务体系负责抓取，
 FastAPI 对外提供 REST 接口。
 
-架构与设计决策见 [docs/refactor-design.md](docs/refactor-design.md)。
+文档：[API 参考](docs/api.md) · [数据生命周期（读穿透/缺口补抓/复权）](docs/data-lifecycle.md) · [架构设计](docs/refactor-design.md)
 
 ## 功能
 
