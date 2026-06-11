@@ -1,4 +1,8 @@
-# 数据缓存策略设计
+# 数据缓存策略设计（已归档）
+
+> **本文档已废弃**：diskcache 缓存层随 MCP 架构一同移除（tag `pre-restructure`）。
+> 本文规则已 PostgreSQL 化为水位表新鲜度规则，见
+> [refactor-design.md 5.4 节](refactor-design.md) 与 `db/coverage.py`。
 
 ## 背景
 

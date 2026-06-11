@@ -1,18 +1,26 @@
 [project]
 name = "stockdata"
 version = "0.1.0"
-description = "stock data mcp"
+description = "A股数据服务：FastAPI + Celery + PostgreSQL"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "alembic>=1.18.4",
     "baostock>=0.9.1",
-    "diskcache>=5.6.3",
-    "fastmcp>=3.2.0",
+    "celery[redis]>=5.6.3",
+    "fastapi>=0.136.3",
     "pandas>=3.0.0",
-    "tabulate>=0.10.0",
+    "psycopg[binary]>=3.3.4",
+    "pydantic-settings>=2.13.1",
+    "sqlalchemy>=2.0.50",
+    "uvicorn>=0.42.0",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=8.3.0",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

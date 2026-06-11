@@ -1,0 +1,15 @@
+[Unit]
+Description=stockdata beat (Celery 定时同步调度器)
+Requires=valkey.service
+After=network.target valkey.service
+
+[Service]
+Type=exec
+User=david
+WorkingDirectory=/home/david/workspace/stockdata
+ExecStart=/usr/bin/env uv run celery -A fetcher.app beat --loglevel=info
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

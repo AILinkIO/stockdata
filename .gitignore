@@ -206,3 +206,6 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 .idea
+
+# Celery beat 运行时状态
+celerybeat-schedule*
