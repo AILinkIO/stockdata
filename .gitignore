@@ -209,3 +209,8 @@ __marimo__/
 
 # Celery beat 运行时状态
 celerybeat-schedule*
+
+# .NET
+bin/
+obj/
+*.user
