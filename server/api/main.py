@@ -1,7 +1,7 @@
 """
 A股数据 Web 服务入口。
 
-启动方式（项目根目录）:
+启动方式（本工程目录 server/ 下）:
     uv run uvicorn api.main:app --host 0.0.0.0 --port 8000
 
 接口文档: http://localhost:8000/docs

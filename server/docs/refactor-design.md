@@ -604,3 +604,7 @@ stockdata/
 12. **已入库代码定时同步（同日新增）**：beat 任务 `sync_tracked_codes`（每交易日
     17:10）遍历 data_watermark 中的 K线/因子水位，对每个 (code, 类型) 投递
     `last_date → 今天` 的增量抓取（含 last_date 当日，覆写盘中写入的未收盘 bar）。
+13. **仓库重组为 monorepo（2026-06-11）**：本工程（api + fetcher + db）整体下沉到
+    `server/` 子目录，仓库根只留 LICENSE/.gitignore/索引 README，未来新项目平级
+    新增子目录。所有命令在 `server/` 下执行；systemd 单元 WorkingDirectory 已同步。
+    历史对照脚本 parity_check.py 已删除（依赖已不存在的旧实现，记录见 git 历史）。

@@ -1,7 +1,7 @@
 """
 定时同步任务（设计文档 4.4 节）。调度表见 fetcher/app.py 的 beat_schedule。
 
-启动 beat（项目根目录）:
+启动 beat（本工程目录 server/ 下）:
     uv run celery -A fetcher.app beat --loglevel=info
 """
 

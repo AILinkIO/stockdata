@@ -1,7 +1,7 @@
 """
 全局配置模块（pydantic-settings）。
 
-所有配置项可通过环境变量覆盖，前缀 STOCKDATA_，亦可写入项目根目录 .env 文件。
+所有配置项可通过环境变量覆盖，前缀 STOCKDATA_，亦可写入本工程目录（server/）的 .env 文件。
 详见 docs/refactor-design.md 与 docs/migration-plan.md。
 """
 

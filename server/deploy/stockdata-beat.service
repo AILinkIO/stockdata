@@ -6,7 +6,7 @@ After=network.target valkey.service
 [Service]
 Type=exec
 User=david
-WorkingDirectory=/home/david/workspace/stockdata
+WorkingDirectory=/home/david/workspace/stockdata/server
 ExecStart=/usr/bin/env uv run celery -A fetcher.app beat --loglevel=info
 Restart=on-failure
 RestartSec=5

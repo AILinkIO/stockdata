@@ -6,7 +6,7 @@
   3. worker_max_tasks_per_child 到数后子进程被回收重建（PID 轮换）
   4. worker_process_init 信号在子进程内触发（生产中用于 bs.login()）
 
-运行方式（项目根目录）:
+运行方式（本工程目录 server/ 下）:
     uv run python scripts/smoke_celery.py
 
 依赖 .env 中的 STOCKDATA_BROKER_URL / STOCKDATA_RESULT_BACKEND。

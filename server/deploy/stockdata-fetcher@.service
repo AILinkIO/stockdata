@@ -6,7 +6,7 @@ After=network.target postgresql.service valkey.service
 [Service]
 Type=exec
 User=david
-WorkingDirectory=/home/david/workspace/stockdata
+WorkingDirectory=/home/david/workspace/stockdata/server
 ExecStart=/usr/bin/env uv run celery -A fetcher.app worker -Q shard%i -n shard%i@%%h -c 1 --loglevel=info
 # Celery 优雅退出：等待在执行的任务完成（最长至 task_time_limit）
 TimeoutStopSec=120
