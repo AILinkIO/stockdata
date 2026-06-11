@@ -15,7 +15,7 @@ import logging
 import zlib
 
 from celery import Celery
-from celery.signals import worker_process_init, worker_process_shutdown
+from celery.signals import worker_process_shutdown
 
 from settings import settings
 
@@ -83,19 +83,10 @@ app.conf.beat_schedule = {
 }
 
 
-@worker_process_init.connect
-def _init_child(**kwargs):
-    """子进程 fork 后登录 baostock（父进程永不接触 baostock）。
-
-    登录失败不在此处抛出：任务执行时 ensure_login() 会再尝试并正确走
-    Celery 的重试/失败路径，避免子进程无限重生循环。
-    """
-    from fetcher.providers import baostock as provider
-
-    try:
-        provider.ensure_login()
-    except Exception as e:
-        logger.warning("子进程初始登录失败，任务执行时将重试: %s", e)
+# 不在 worker_process_init 里登录 baostock：bs.login() 在慢网络下阻塞超过
+# billiard 的 proc_alive_timeout（4s）时，父进程会判定子进程启动失败而杀掉重
+# fork，陷入 fork→登录阻塞→被杀 的循环，整个分片瘫痪。登录惰性化到任务查询
+# 路径上的 ensure_login()，失败走 Celery 的重试/失败路径；父进程仍不接触 baostock。
 
 
 @worker_process_shutdown.connect
