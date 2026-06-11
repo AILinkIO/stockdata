@@ -12,10 +12,10 @@ builder.Services.AddHttpClient<StockDataApiClient>(c =>
     })
     .AddStandardResilienceHandler(o =>
     {
-        o.AttemptTimeout.Timeout = TimeSpan.FromSeconds(100);       // 单次尝试（覆盖 API 60s 等待）
-        o.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(240);  // 总预算
+        o.AttemptTimeout.Timeout = TimeSpan.FromSeconds(150);       // 单次尝试（覆盖 API 120s 等待）
+        o.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(360);  // 总预算
         o.Retry.MaxRetryAttempts = 2;                               // 504/502 重试（届时多已落库）
-        o.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(200);
+        o.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(300);
     });
 
 builder.Services

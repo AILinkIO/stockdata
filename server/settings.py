@@ -30,7 +30,10 @@ class Settings(BaseSettings):
     result_expires: int = 600          # 结果只为读穿透等待服务
 
     # ── API 读穿透 ──
-    fetch_wait_timeout: int = 60       # 等待抓取任务完成的总超时（秒）
+    fetch_wait_timeout: int = 120      # 等待抓取任务完成的总超时（秒）；
+                                       # 须 ≥ task_time_limit + 余量，保证提交方能等到
+                                       # 任务终态（成功/硬超时被杀），而非中途放弃后
+                                       # 让重试撞上去重锁
 
     # ── 数据回填 ──
     minute_backfill_start: str = "2023-01-01"  # 分钟线回填起点（全史过大）
