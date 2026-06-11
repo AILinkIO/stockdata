@@ -1,11 +1,12 @@
 # API 参考
 
-> 在线交互文档：服务运行后访问 <http://localhost:8000/docs>（OpenAPI 自动生成，参数定义以其为准）。
+> 在线交互文档：服务运行后访问 <http://localhost:8080/docs>（OpenAPI 自动生成，参数定义以其为准）。
 > 本文档侧重接口清单、全局约定与行为语义。数据新鲜度与抓取行为见 [data-lifecycle.md](data-lifecycle.md)。
 
 ## 全局约定
 
-- **Base URL**：`http://<host>:8000`，所有业务接口在 `/api/v1` 前缀下，均为 `GET`（除任务提交）。
+- **Base URL**：`http://<host>:8080`，所有业务接口在 `/api/v1` 前缀下，均为 `GET`（除任务提交）。
+  （8000 是旧 MCP 服务的端口，REST 服务自 2026-06-11 起使用 8080，避免混淆。）
 - **股票代码宽松格式**：所有 `code` 参数支持 `sh.600000` / `600000` / `600000.SH` / `SH600000` 等常见写法，服务端自动标准化（6 开头视为上交所）。
 - **日期格式**：`YYYY-MM-DD`。
 - **读穿透**：数据接口在库中缺数据/数据过期时自动投递抓取任务并等待（默认最长 60s）。
@@ -36,7 +37,7 @@
 带 `*` 为必填，下同。
 
 ```bash
-curl "localhost:8000/api/v1/stocks/600000/kline?start_date=2024-01-01&end_date=2024-12-31&adjust_flag=2"
+curl "localhost:8080/api/v1/stocks/600000/kline?start_date=2024-01-01&end_date=2024-12-31&adjust_flag=2"
 ```
 
 ## 财务报表 `/api/v1/stocks/{code}/financials/...`
@@ -95,7 +96,7 @@ curl "localhost:8000/api/v1/stocks/600000/kline?start_date=2024-01-01&end_date=2
 
 ```bash
 # 提交（202）
-curl -X POST localhost:8000/api/v1/tasks/backfill \
+curl -X POST localhost:8080/api/v1/tasks/backfill \
   -H "Content-Type: application/json" \
   -d '{"task": "fetcher.fetch_kline",
        "params": {"code": "sh.600000", "start_date": "2020-01-01",
@@ -103,7 +104,7 @@ curl -X POST localhost:8000/api/v1/tasks/backfill \
 # → {"task_id": 42, "celery_task_id": "..."}；同参数任务已在队列时 task_id 为 null
 
 # 轮询状态
-curl localhost:8000/api/v1/tasks/42
+curl localhost:8080/api/v1/tasks/42
 # → {"status": "pending|running|succeeded|failed", "error": ..., "started_at": ...}
 ```
 

@@ -7,7 +7,7 @@ After=network.target postgresql.service valkey.service
 Type=exec
 User=david
 WorkingDirectory=/home/david/workspace/stockdata/server
-ExecStart=/usr/bin/env uv run uvicorn api.main:app --host 0.0.0.0 --port 8000
+ExecStart=/usr/bin/env uv run uvicorn api.main:app --host 0.0.0.0 --port 8080
 Restart=on-failure
 RestartSec=5
 

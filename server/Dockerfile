@@ -20,4 +20,4 @@ RUN uv sync --frozen --no-dev
 COPY . .
 
 # 默认命令为 API；fetcher/beat 由 compose 覆盖 command
-CMD ["uv", "run", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uv", "run", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8080"]

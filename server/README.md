@@ -63,23 +63,23 @@ uv run celery -A fetcher.app worker -Q shard0 -n shard0@%h -c 1 --loglevel=info
 uv run celery -A fetcher.app worker -Q shard1 -n shard1@%h -c 1 --loglevel=info
 uv run celery -A fetcher.app worker -Q shard2 -n shard2@%h -c 1 --loglevel=info
 uv run celery -A fetcher.app beat --loglevel=info     # 定时同步
-uv run uvicorn api.main:app --host 0.0.0.0 --port 8000  # API
+uv run uvicorn api.main:app --host 0.0.0.0 --port 8080  # API
 # 裸机常驻可用 systemd 单元（deploy/，fetcher 为模板单元 stockdata-fetcher@{0..2}）；
 # 两种方式二选一，不可同时运行（端口与队列消费会冲突）
 ```
 
-接口文档：<http://localhost:8000/docs>
+接口文档：<http://localhost:8080/docs>
 
 数据获取与任务提交均通过 REST：数据端点自带读穿透（缺数据自动抓取），
 批量回填走 `POST /api/v1/tasks/backfill`（202 + task_id 轮询）。
 
 ```bash
 # 示例
-curl "localhost:8000/api/v1/stocks/600000/kline?start_date=2024-01-01&end_date=2024-12-31"
-curl "localhost:8000/api/v1/stocks/600000/kline?start_date=2024-01-01&end_date=2024-12-31&adjust_flag=2"  # 前复权
-curl "localhost:8000/api/v1/stocks/600000/financials/profit?year=2024&quarter=3"
-curl "localhost:8000/api/v1/stocks/600000/analysis"
-curl "localhost:8000/api/v1/dates/latest-trading-day"
+curl "localhost:8080/api/v1/stocks/600000/kline?start_date=2024-01-01&end_date=2024-12-31"
+curl "localhost:8080/api/v1/stocks/600000/kline?start_date=2024-01-01&end_date=2024-12-31&adjust_flag=2"  # 前复权
+curl "localhost:8080/api/v1/stocks/600000/financials/profit?year=2024&quarter=3"
+curl "localhost:8080/api/v1/stocks/600000/analysis"
+curl "localhost:8080/api/v1/dates/latest-trading-day"
 ```
 
 ## 项目结构
@@ -100,7 +100,7 @@ db/
 └── alembic/          # schema 迁移
 core/                 # 代码标准化等纯逻辑
 deploy/               # systemd 单元
-scripts/              # smoke_celery.py（部署验证）、parity_check.py（历史对照）
+scripts/              # smoke_celery.py（部署验证）
 ```
 
 ## 运维
