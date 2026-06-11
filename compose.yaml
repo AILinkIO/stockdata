@@ -1,19 +1,21 @@
-# stockdata server 混合部署：
+# stockdata 全栈混合部署（仓库根目录，一键拉起见 ./up.sh）：
 #   - PostgreSQL 与 Valkey(Redis) 使用物理机服务（127.0.0.1）
-#   - api / fetcher 分片 / beat 在容器中
-# 容器走 host 网络直连本机服务，.env 中的 127.0.0.1 DSN 零改动。
+#   - api / fetcher 分片 / beat（server/）+ mcp（dotnet-mcp/）在容器中
+# 容器走 host 网络直连本机服务，server/.env 中的 127.0.0.1 DSN 零改动。
 #
-#   sudo docker compose up -d --build
+#   ./up.sh                       # 等价于 sudo docker compose up -d --build
 #   sudo docker compose ps
 #
 # 注意：fetcher 分片数 = settings.worker_shards（默认 3），
 # 调整时需同步增减 fetcher-shardN 服务。
 
+name: stockdata
+
 x-app: &app
   image: stockdata-server
-  build: .
+  build: ./server
   network_mode: host        # 直连物理机 127.0.0.1 的 PG/Valkey
-  env_file: .env            # 注入 STOCKDATA_*（DSN、队列地址、fetcher 参数）
+  env_file: server/.env     # 注入 STOCKDATA_*（DSN、队列地址、fetcher 参数）
   restart: unless-stopped
   depends_on:
     migrate:
@@ -27,9 +29,9 @@ services:
   # 一次性：建/升级 schema 后退出，其余服务等它成功才启动
   migrate:
     image: stockdata-server
-    build: .
+    build: ./server
     network_mode: host
-    env_file: .env
+    env_file: server/.env
     command: uv run alembic upgrade head
     restart: "no"
 
@@ -60,3 +62,20 @@ services:
   beat:
     <<: *app
     command: uv run celery -A fetcher.app beat -s /tmp/celerybeat-schedule --loglevel=info
+
+  # MCP 服务（dotnet-mcp 工程）：透传 REST + TA-Lib 指标分析，:8000 Streamable HTTP
+  mcp:
+    image: stockdata-mcp
+    build: ./dotnet-mcp
+    network_mode: host
+    environment:
+      StockData__ApiBase: http://127.0.0.1:8080
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8000"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

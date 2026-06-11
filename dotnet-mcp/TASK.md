@@ -52,11 +52,15 @@
 
 ## 阶段 D：容器化与收尾
 
-- [ ] D1 Dockerfile（sdk 多阶段构建 → aspnet:10.0 运行时）
-- [ ] D2 加入 server/compose.yaml：`mcp` 服务，host 网络，depends_on api
-- [ ] D3 根 README 项目索引登记；dotnet-mcp/README.md（启动/配置/工具清单）
-- [ ] D4 全栈验收：`docker compose up -d` 一条命令拉起含 MCP 的全栈，
-      MCP 客户端实测透传 + 指标各 1 个工具
+- [x] D1 Dockerfile（sdk 多阶段构建 → aspnet:10.0 运行时；
+      .dockerignore 需 `**/bin`/`**/obj`，否则宿主 obj/ 混入致 publish NETSDK1064）
+- [x] D2 加入 compose：`mcp` 服务，host 网络，depends_on api
+      （compose.yaml 上移到仓库根目录，项目名 `stockdata`，根目录 `./up.sh` 一键拉起）
+- [x] D3 根 README 项目索引登记；dotnet-mcp/README.md（启动/配置/工具清单）
+- [x] D4 全栈验收：根目录 `./up.sh`（docker compose up -d --build）一条命令拉起
+      含 MCP 的全栈，MCP 客户端实测透传 + 指标各 1 个工具
+      （2026-06-11：get_latest_trading_date、calc_indicators 实测通过；
+      mcp 容器 healthy；当日 baostock 断连，读穿透错误映射路径一并验证）
 
 ## 风险与验证记录
 

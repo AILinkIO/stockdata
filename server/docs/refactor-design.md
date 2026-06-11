@@ -616,3 +616,6 @@ stockdata/
     `.env` 与 PG/Valkey 配置）。共用一个镜像（uv + python3.14-bookworm-slim），
     `.env` 不进镜像、由 env_file 运行时注入；一次性 `migrate` 服务先执行
     `alembic upgrade head`，其余服务等其成功。与 systemd 裸机方案二选一。
+    （同日补充：compose.yaml 上移到仓库根目录并改名项目为 `stockdata`，纳入
+    dotnet-mcp 的 `mcp` 服务，根目录 `./up.sh` 一键构建拉起全栈；build/env_file
+    路径相应改为 `./server` 与 `server/.env`。）

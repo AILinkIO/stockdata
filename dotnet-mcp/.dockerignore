@@ -1,0 +1,6 @@
+**/bin
+**/obj
+tests
+TASK.md
+README.md
+Dockerfile

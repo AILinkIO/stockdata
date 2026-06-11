@@ -52,10 +52,10 @@ uv sync
 # 初始化数据库
 uv run alembic upgrade head
 
-# 启动方式一：Docker Compose（推荐）
+# 启动方式一：Docker Compose（推荐；compose.yaml 在仓库根目录，含 mcp 服务）
 # PG/Valkey 用物理机服务，api/fetcher×3分片/beat 在容器（host 网络直连 127.0.0.1）；
 # migrate 服务先跑 alembic upgrade head，成功后其余服务才启动
-sudo docker compose up -d --build
+cd .. && ./up.sh          # 等价于 sudo docker compose up -d --build
 
 # 启动方式二：裸机进程（开发/调试）
 # 同 code 同任务类型恒定路由到同一分片（单进程），天然串行并复用连接
