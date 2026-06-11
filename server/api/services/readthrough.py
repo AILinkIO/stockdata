@@ -4,7 +4,8 @@
 ensure_* 系列函数返回后即保证请求范围已覆盖且新鲜，调用方直接 SELECT。
 """
 
-from datetime import date, datetime
+from collections.abc import Iterator
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from api.services.dispatch import dispatch_and_wait
@@ -68,11 +69,33 @@ def _range_task(data_type: str, code: str, fs: date, fe: date) -> tuple[str, dic
     raise ValueError(f"未知范围数据集: {data_type}")
 
 
+# 超大缺口切片上限（天/任务）：单任务时长有界（慢网络下也远低于 task_time_limit），
+# 且每段落库即推进水位——中途失败后重试只补剩余段，全史回填具备断点续传。
+# 未列出的数据集（日历/宏观等）行数小，不切。
+_SLICE_DAYS = {
+    "k_d": 3650, "k_w": 3650, "k_m": 3650, "adjust_factor": 3650,
+    "k_5": 730, "k_15": 730, "k_30": 730, "k_60": 730,
+}
+
+
+def _split_range(fs: date, fe: date, max_days: int | None) -> Iterator[tuple[date, date]]:
+    """把 [fs, fe] 切成跨度 ≤ max_days 的连续闭区间，升序无缝衔接。"""
+    if max_days is None:
+        yield fs, fe
+        return
+    step = timedelta(days=max_days - 1)
+    while fs <= fe:
+        cut = min(fs + step, fe)
+        yield fs, cut
+        fs = cut + timedelta(days=1)
+
+
 def ensure_range(data_type: str, start: date, end: date, code: str = "") -> None:
     decision = coverage.check_range(_watermark(code, data_type), data_type, start, end, now())
     for fs, fe in decision.fetch_ranges:
-        task_name, params = _range_task(data_type, code, fs, fe)
-        dispatch_and_wait(task_name, params)
+        for ss, se in _split_range(fs, fe, _SLICE_DAYS.get(data_type)):
+            task_name, params = _range_task(data_type, code, ss, se)
+            dispatch_and_wait(task_name, params)
 
 
 def ensure_quarter(code: str, year: int, quarter: int) -> None:

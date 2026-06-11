@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     task_soft_time_limit: int = 60     # 软超时：先抛异常给任务清理机会
     visibility_timeout: int = 600      # Redis broker 重投递窗口，必须 > task_time_limit
     result_expires: int = 600          # 结果只为读穿透等待服务
+    baostock_socket_timeout: int = 30  # baostock TCP 超时：挂死靠它快速失败重连，
+                                       # 而非等 task_time_limit SIGKILL；须 < task_soft_time_limit
 
     # ── API 读穿透 ──
     fetch_wait_timeout: int = 120      # 等待抓取任务完成的总超时（秒）；

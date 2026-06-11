@@ -16,6 +16,7 @@ import logging
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
+from billiard.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import update as sa_update
 
 from db.models import DataType, FetchTask, TaskStatus
@@ -62,7 +63,9 @@ def _mark(fetch_task_id: int | None, **fields) -> None:
 
 _TASK_OPTS = dict(
     bind=True,
-    autoretry_for=(DataSourceError,),
+    # SoftTimeLimitExceeded 也任务级重试：进程内剩余预算不足时 provider 直接
+    # 放行该异常，重新投递的执行有全新时限
+    autoretry_for=(DataSourceError, SoftTimeLimitExceeded),
     dont_autoretry_for=(NoDataFoundError,),
     retry_backoff=5,
     retry_backoff_max=60,

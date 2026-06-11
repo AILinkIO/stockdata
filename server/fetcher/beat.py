@@ -35,13 +35,25 @@ def _is_trading_day(d: date) -> bool:
         )
 
 
+def _submit(task_name: str, params: dict) -> bool:
+    """经 fetch_task 去重投递。返回是否实际投递（False = 同参数任务已在队列，
+    通常是读穿透刚触发过）。相比直接 send_task：不与读穿透重复抓取，
+    且定时任务在 fetch_task 留有流水可查。"""
+    from api.services.dispatch import submit  # 局部导入，避免 fetcher→api 模块级依赖
+
+    row_id, _ = submit(task_name, params)
+    if row_id is None:
+        logger.info("跳过重复任务 %s %s", task_name, params)
+    return row_id is not None
+
+
 @app.task(name="fetcher.beat.sync_calendar")
 def sync_calendar() -> dict:
     """每日 08:00：同步当年与次年交易日历（捕获临时调整）。"""
     t = _today()
-    app.send_task(
+    _submit(
         "fetcher.fetch_trade_calendar",
-        kwargs={
+        {
             "start_date": date(t.year, 1, 1).isoformat(),
             "end_date": date(t.year + 1, 12, 31).isoformat(),
         },
@@ -59,16 +71,16 @@ def sync_market() -> dict:
 
     dispatched = []
     snap = t.isoformat()
-    app.send_task("fetcher.fetch_stock_list", kwargs={"snap_date": snap})
-    dispatched.append("stock_list")
+    if _submit("fetcher.fetch_stock_list", {"snap_date": snap}):
+        dispatched.append("stock_list")
     for index_code in ("sz50", "hs300", "zz500"):
-        app.send_task(
+        if _submit(
             "fetcher.fetch_index_constituent",
-            kwargs={"index_code": index_code, "snap_date": snap},
-        )
-        dispatched.append(f"index_{index_code}")
-    app.send_task("fetcher.fetch_industry", kwargs={"snap_date": snap})
-    dispatched.append("industry")
+            {"index_code": index_code, "snap_date": snap},
+        ):
+            dispatched.append(f"index_{index_code}")
+    if _submit("fetcher.fetch_industry", {"snap_date": snap}):
+        dispatched.append("industry")
     return {"dispatched": dispatched}
 
 
@@ -105,20 +117,20 @@ def sync_tracked_codes() -> dict:
         start = last_date.isoformat()  # 含 last_date：覆写可能的盘中数据
         end = t.isoformat()
         if data_type in k_types:
-            app.send_task("fetcher.fetch_kline", kwargs={
+            ok = _submit("fetcher.fetch_kline", {
                 "code": code, "start_date": start, "end_date": end,
                 "frequency": k_types[data_type],
             })
         elif data_type in minute_types:
-            app.send_task("fetcher.fetch_kline_minute", kwargs={
+            ok = _submit("fetcher.fetch_kline_minute", {
                 "code": code, "start_date": start, "end_date": end,
                 "frequency": minute_types[data_type],
             })
         else:  # adjust_factor：除权事件检测
-            app.send_task("fetcher.fetch_adjust_factor", kwargs={
+            ok = _submit("fetcher.fetch_adjust_factor", {
                 "code": code, "start_date": start, "end_date": end,
             })
-        dispatched += 1
+        dispatched += ok
 
     logger.info("已入库代码同步：投递 %d 个增量任务", dispatched)
     return {"dispatched": dispatched}
@@ -130,5 +142,5 @@ def refresh_yesterday_list() -> dict:
     y = _today() - timedelta(days=1)
     if not _is_trading_day(y):
         return {"skipped": "non-trading-day"}
-    app.send_task("fetcher.fetch_stock_list", kwargs={"snap_date": y.isoformat()})
+    _submit("fetcher.fetch_stock_list", {"snap_date": y.isoformat()})
     return {"dispatched": "stock_list", "snap_date": y.isoformat()}

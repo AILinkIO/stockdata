@@ -50,6 +50,9 @@ app.conf.update(
     # 可靠性：子进程被 kill 后任务重回队列
     task_acks_late=True,
     task_reject_on_worker_lost=True,
+    # acks_late 的标准搭配：默认预取 4 时，连续慢任务会让被预取消息 unacked
+    # 超过 visibility_timeout 而被重复投递执行
+    worker_prefetch_multiplier=1,
     # Redis broker 的重投递窗口，必须 > task_time_limit
     broker_transport_options={"visibility_timeout": settings.visibility_timeout},
     result_expires=settings.result_expires,
