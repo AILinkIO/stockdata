@@ -107,6 +107,11 @@ def check_range(
     返回的 fetch_ranges 至多三段：头部缺口、尾部缺口、未定型区域刷新。
     """
     today = now.date()
+    if data_type != "trade_calendar":
+        # 除日历外业务数据不存在于未来：钳制请求尾，避免未来范围每次都判出尾部缺口
+        end = min(end, today)
+        if end < start:
+            return Decision([], "请求范围全部在未来，无可抓取数据")
 
     if wm is None:
         # 首次触达：从回填起点抓到请求尾（保证覆盖连续）

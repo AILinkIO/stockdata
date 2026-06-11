@@ -1,6 +1,6 @@
 # 重构设计文档：MCP 服务 → Web 服务 + Celery 任务体系
 
-> 状态：设计定稿，待实施
+> 状态：已实施完成（含可选阶段 7 MCP 薄壳）。旧实现见 tag `pre-restructure`
 > 关联文档：
 > - [migration-plan.md](migration-plan.md) —— 迁移实施计划（各阶段任务清单、验收标准、回滚预案）
 > - [cache-strategy.md](cache-strategy.md) —— 旧缓存策略，本文档 5.4 节为其 PostgreSQL 化映射，迁移完成后归档
@@ -561,3 +561,37 @@ stockdata/
 | API 等待语义 | 读穿透 + 60s 超时；批量回填走异步任务接口 |
 | 财报指标存储 | JSONB；需截面筛选时提升生成列 |
 | 周/月线来源 | 直接存 baostock 返回值，不从日线推导 |
+
+## 10. 实施偏差记录（as-built）
+
+实施期间确定的与本文档原始设计的偏差，以下为最终实现状态：
+
+1. **队列后端为系统已有的 Valkey 8**（Debian 13 以 Valkey 替代 Redis，协议兼容）。
+   实例与其他应用共享：db0 被占用，本项目用 db2=broker、db3=结果后端；
+   **未开启 AOF**（不动共享实例的持久化配置，任务可重建可接受）。
+2. **API 路由为同步函数**（FastAPI 自动调度到线程池），数据访问用同步
+   SQLAlchemy session——读穿透中阻塞等待 Celery 结果不影响事件循环，
+   且实现显著简化。原设计的 async engine 未启用（db/session.py 中保留）。
+3. **季度财报放弃区间水位**：点状抓取配区间水位会对中间未抓取的季度产生虚假
+   覆盖声明。改用"financial_report 行存在性 + fetch_task 成功记录"做点状判定
+   （fetch_task 兼作披露期后空结果的永久负记忆），见 `db/coverage.py::check_quarter`。
+   "水位表是唯一抓取决策入口"（5.1 原则 4）对季度财报与快照类数据集放宽为
+   "水位表/事实表存在性 + fetch_task"。
+4. **express/forecast 的日期过滤字段为披露日期 pub_date**（与 baostock 查询语义
+   实测一致），而非报告期 stat_date。
+5. **闲置连接预防性重登录**：baostock 服务端会静默断开闲置连接（实测约数分钟），
+   复用死连接会阻塞 recv 直到被 SIGKILL。provider 在连接闲置超 60s 时主动重登录，
+   且重登录路径不调用 logout（旧连接的 logout 同样会挂）。
+6. **僵尸任务防护**：子进程被 SIGKILL 时任务内的状态标记无法执行，fetch_task 行
+   会卡在 running 并永久占住去重索引。dispatch 端在 Celery 结果失败时兜底标记
+   failed；等待端对 started_at 超过 task_time_limit×2 的 running 行判僵并清理。
+7. **当日股票列表盘中未发布**：fetch_stock_list 对空结果返回 0 行不记水位，
+   API 层在未显式指定日期时自动回退前一交易日（最多 3 个）。
+8. **未来日期范围钳制**：除交易日历外，覆盖度判定将请求尾钳制到今天，
+   避免含未来日期的请求每次都判出尾部缺口、空投任务。
+9. **复权公式（实测确认）**：bar 复权价 = 不复权价 × 因子，因子取除权日 ≤ bar
+   日期的最近一次事件（前复权用 fore、后复权用 back），首个事件之前因子为 1。
+   与 baostock 输出逐位一致。
+10. **阶段 7 已实施**：`mcp_shim/`，38 个工具，名称与参数兼容旧版（原
+    format/markdown 参数移除，统一返回 JSON 文本）；fastmcp 依赖隔离在
+    `mcp` 依赖组，监听 8001。

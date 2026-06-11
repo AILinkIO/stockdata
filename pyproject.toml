@@ -20,6 +20,9 @@ dependencies = [
 dev = [
     "pytest>=8.3.0",
 ]
+mcp = [
+    "fastmcp>=3.4.2",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

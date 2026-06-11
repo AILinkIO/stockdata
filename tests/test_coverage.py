@@ -217,3 +217,10 @@ def test_snapshot_today_fresh():
     w = wm(TODAY, TODAY, fetched_ago_seconds=3600)
     d = check_snapshot(w, "stock_list", TODAY, has_rows=True, now=NOW)
     assert d.fresh
+
+
+def test_future_range_not_refetched():
+    # 未来范围不产生尾部缺口（避免每次请求都空投任务）；全未来范围直接 fresh
+    w = wm(date(2020, 1, 1), TODAY, fetched_ago_seconds=60)
+    assert check_range(w, "k_d", date(2026, 6, 1), date(2099, 1, 31), NOW).fresh
+    assert check_range(w, "k_d", date(2099, 1, 1), date(2099, 1, 31), NOW).fresh

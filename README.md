@@ -62,6 +62,11 @@ uv run uvicorn api.main:app --host 0.0.0.0 --port 8000  # API
 接口文档：<http://localhost:8000/docs>
 
 ```bash
+# 可选：MCP 薄壳（供 LLM 接入，纯转发 REST API，工具面与旧版兼容）
+uv run --group mcp python -m mcp_shim.main   # http://0.0.0.0:8001/mcp
+```
+
+```bash
 # 示例
 curl "localhost:8000/api/v1/stocks/600000/kline?start_date=2024-01-01&end_date=2024-12-31"
 curl "localhost:8000/api/v1/stocks/600000/kline?start_date=2024-01-01&end_date=2024-12-31&adjust_flag=2"  # 前复权
@@ -87,6 +92,7 @@ db/
 ├── coverage.py       # 覆盖度/新鲜度规则
 └── alembic/          # schema 迁移
 core/                 # 代码标准化等纯逻辑
+mcp_shim/             # MCP 薄壳（fastmcp 依赖在独立 mcp 组，与主体解耦）
 deploy/               # systemd 单元
 scripts/              # smoke_celery.py（部署验证）、parity_check.py（历史对照）
 ```
