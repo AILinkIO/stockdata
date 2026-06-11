@@ -52,15 +52,20 @@ uv sync
 # 初始化数据库
 uv run alembic upgrade head
 
-# 启动（分片 worker × N + beat + API）
+# 启动方式一：Docker Compose（推荐）
+# PG/Valkey 用物理机服务，api/fetcher×3分片/beat 在容器（host 网络直连 127.0.0.1）；
+# migrate 服务先跑 alembic upgrade head，成功后其余服务才启动
+sudo docker compose up -d --build
+
+# 启动方式二：裸机进程（开发/调试）
 # 同 code 同任务类型恒定路由到同一分片（单进程），天然串行并复用连接
 uv run celery -A fetcher.app worker -Q shard0 -n shard0@%h -c 1 --loglevel=info
 uv run celery -A fetcher.app worker -Q shard1 -n shard1@%h -c 1 --loglevel=info
 uv run celery -A fetcher.app worker -Q shard2 -n shard2@%h -c 1 --loglevel=info
 uv run celery -A fetcher.app beat --loglevel=info     # 定时同步
 uv run uvicorn api.main:app --host 0.0.0.0 --port 8000  # API
-
-# 部署：systemd 单元见 deploy/（fetcher 为模板单元 stockdata-fetcher@{0..2}）
+# 裸机常驻可用 systemd 单元（deploy/，fetcher 为模板单元 stockdata-fetcher@{0..2}）；
+# 两种方式二选一，不可同时运行（端口与队列消费会冲突）
 ```
 
 接口文档：<http://localhost:8000/docs>

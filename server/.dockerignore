@@ -1,0 +1,19 @@
+# 运行时/本地产物
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+celerybeat-schedule*
+
+# 机密：.env 不进镜像，由 compose 的 env_file 在运行时注入
+.env
+
+# 与镜像无关
+docs
+tests
+deploy
+scripts
+Dockerfile
+compose.yaml
+README.md

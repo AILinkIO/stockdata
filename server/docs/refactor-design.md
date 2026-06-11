@@ -608,3 +608,9 @@ stockdata/
     `server/` 子目录，仓库根只留 LICENSE/.gitignore/索引 README，未来新项目平级
     新增子目录。所有命令在 `server/` 下执行；systemd 单元 WorkingDirectory 已同步。
     历史对照脚本 parity_check.py 已删除（依赖已不存在的旧实现，记录见 git 历史）。
+14. **Docker Compose 混合部署（2026-06-11）**：`server/compose.yaml`——PG 与
+    Valkey 保留物理机服务，api / fetcher 三分片 / beat 容器化，容器以
+    `network_mode: host` 直连 127.0.0.1（PG 仅监听 localhost，host 网络免改
+    `.env` 与 PG/Valkey 配置）。共用一个镜像（uv + python3.14-bookworm-slim），
+    `.env` 不进镜像、由 env_file 运行时注入；一次性 `migrate` 服务先执行
+    `alembic upgrade head`，其余服务等其成功。与 systemd 裸机方案二选一。

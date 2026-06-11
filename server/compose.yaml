@@ -1,0 +1,62 @@
+# stockdata server 混合部署：
+#   - PostgreSQL 与 Valkey(Redis) 使用物理机服务（127.0.0.1）
+#   - api / fetcher 分片 / beat 在容器中
+# 容器走 host 网络直连本机服务，.env 中的 127.0.0.1 DSN 零改动。
+#
+#   sudo docker compose up -d --build
+#   sudo docker compose ps
+#
+# 注意：fetcher 分片数 = settings.worker_shards（默认 3），
+# 调整时需同步增减 fetcher-shardN 服务。
+
+x-app: &app
+  image: stockdata-server
+  build: .
+  network_mode: host        # 直连物理机 127.0.0.1 的 PG/Valkey
+  env_file: .env            # 注入 STOCKDATA_*（DSN、队列地址、fetcher 参数）
+  restart: unless-stopped
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+
+x-fetcher: &fetcher
+  <<: *app
+  stop_grace_period: 120s   # Celery 优雅退出：等在执行的任务完成（≤ task_time_limit）
+
+services:
+  # 一次性：建/升级 schema 后退出，其余服务等它成功才启动
+  migrate:
+    image: stockdata-server
+    build: .
+    network_mode: host
+    env_file: .env
+    command: uv run alembic upgrade head
+    restart: "no"
+
+  api:
+    <<: *app
+    command: uv run uvicorn api.main:app --host 0.0.0.0 --port 8000
+    healthcheck:
+      test: ["CMD", "uv", "run", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # 分片 worker：同 code 同任务类型恒定路由到同一分片（单进程，详见设计文档偏差 11）
+  fetcher-shard0:
+    <<: *fetcher
+    command: uv run celery -A fetcher.app worker -Q shard0 -n shard0@%h -c 1 --loglevel=info
+
+  fetcher-shard1:
+    <<: *fetcher
+    command: uv run celery -A fetcher.app worker -Q shard1 -n shard1@%h -c 1 --loglevel=info
+
+  fetcher-shard2:
+    <<: *fetcher
+    command: uv run celery -A fetcher.app worker -Q shard2 -n shard2@%h -c 1 --loglevel=info
+
+  # 定时调度器：全局仅此一个实例；状态文件放容器内 /tmp（可丢，beat 不补发错过的任务）
+  beat:
+    <<: *app
+    command: uv run celery -A fetcher.app beat -s /tmp/celerybeat-schedule --loglevel=info
