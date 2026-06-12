@@ -18,6 +18,8 @@ builder.Services.AddHttpClient<StockDataApiClient>(c =>
         o.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(300);
     });
 
+builder.Services.AddMemoryCache();
+
 builder.Services
     .AddMcpServer()
     .WithHttpTransport()        // Streamable HTTP
