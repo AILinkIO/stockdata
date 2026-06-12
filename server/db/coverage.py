@@ -79,6 +79,23 @@ def settled_boundary(data_type: str, today: date) -> date:
     return today - timedelta(days=1)  # 默认：昨天及以前定型
 
 
+def claimable_last(
+    data_type: str, requested_end: date, actual_last: date | None, today: date
+) -> date:
+    """抓取完成后水位可声明的 last_date（写侧规则，fetcher 任务调用）。
+
+    已定型部分按请求范围声明（空结果 = 已核实确无数据，照常推进防止反复抓取）；
+    未定型尾部只认实际返回的最大业务日期——数据源尚未发布的日期不声明覆盖，
+    留待后续请求重抓。否则"抓取时数据源还没有、之后才发布"的日期一旦滑入
+    定型区就成为永久空洞（例：收盘后日线延迟更新期间抓当日，空结果却声明
+    覆盖当日，次日该日定型，从此不再重抓）。
+    """
+    claimed = min(requested_end, settled_boundary(data_type, today))
+    if actual_last is not None and actual_last > claimed:
+        claimed = actual_last
+    return claimed
+
+
 def quarter_disclosure_deadline(year: int, quarter: int) -> date:
     """季报披露截止日：Q1→4/30、Q2→8/31、Q3→10/31、Q4→次年 4/30。"""
     deadlines = {
@@ -119,19 +136,30 @@ def check_range(
         return Decision([(fetch_from, end)], "首次触达，全量回填")
 
     ranges: list[tuple[date, date]] = []
+    boundary = settled_boundary(data_type, today)
+    stale = _is_stale(wm, data_type, now)
 
     # 头部缺口（罕见：回填起点之前的请求）
     if wm.first_date is not None and start < wm.first_date:
         ranges.append((start, wm.first_date - timedelta(days=1)))
 
-    # 尾部缺口
+    # 尾部缺口。缺口完全落在未定型区时按刷新间隔节流：写侧规则（claimable_last）
+    # 保证定型区之外只有实际拿到数据才声明覆盖，因此这种缺口意味着"已请求过、
+    # 数据源尚未发布"（如收盘后日线延迟更新），不节流会让每次读请求都空抓一次。
+    # 交易日历的未来数据长期有效、随时可抓，不适用该节流。
     if end > wm.last_date:
-        ranges.append((wm.last_date + timedelta(days=1), end))
+        gap_unsettled_only = data_type != "trade_calendar" and wm.last_date >= boundary
+        if not gap_unsettled_only or stale:
+            ranges.append((wm.last_date + timedelta(days=1), end))
 
-    # 未定型区域刷新：请求触及定型边界之后的数据，且距上次抓取超过刷新间隔
-    boundary = settled_boundary(data_type, today)
-    if end > boundary and _is_stale(wm, data_type, now):
-        refresh_from = max(start, boundary + timedelta(days=1))
+    # 未定型区域刷新：起点取**上次抓取时**的定型边界。上次抓取时尚未定型的数据
+    # （盘中写入的当日 bar、迟发布的数据）即使现在已滑入定型区也要重新核实，
+    # 否则会固化为陈旧 bar 或永久空洞。
+    if stale:
+        fetched_day = wm.last_fetched_at.astimezone(now.tzinfo).date()
+        refresh_from = max(
+            start, settled_boundary(data_type, fetched_day) + timedelta(days=1)
+        )
         refresh_to = end if data_type == "trade_calendar" else min(end, today)
         if refresh_from <= refresh_to:
             ranges.append((refresh_from, refresh_to))

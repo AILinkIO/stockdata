@@ -9,6 +9,7 @@ from db.coverage import (
     check_quarter,
     check_range,
     check_snapshot,
+    claimable_last,
     quarter_disclosure_deadline,
     settled_boundary,
 )
@@ -82,6 +83,34 @@ def test_tail_gap_and_stale_merge():
     assert d.fetch_ranges == [(TODAY - timedelta(days=2), TODAY)]
 
 
+def test_unsettled_tail_gap_throttled():
+    # 水位已到定型边界（6/10），缺口只剩未定型的今天：说明刚抓过但数据源尚未
+    # 发布今日数据，刷新间隔内不重抓，超过间隔才抓——防止每次读请求都空抓
+    w = wm(date(2020, 1, 1), TODAY - timedelta(days=1), fetched_ago_seconds=60)
+    assert check_range(w, "k_d", date(2026, 6, 1), TODAY, NOW).fresh
+    w_stale = wm(date(2020, 1, 1), TODAY - timedelta(days=1), fetched_ago_seconds=600)
+    d = check_range(w_stale, "k_d", date(2026, 6, 1), TODAY, NOW)
+    assert d.fetch_ranges == [(TODAY, TODAY)]
+
+
+def test_settled_tail_gap_not_throttled():
+    # 缺口触及定型区（水位落后于定型边界）：数据应当已存在，不受刷新间隔节流
+    w = wm(date(2020, 1, 1), TODAY - timedelta(days=3), fetched_ago_seconds=60)
+    d = check_range(w, "k_d", date(2026, 6, 1), TODAY, NOW)
+    assert d.fetch_ranges == [(TODAY - timedelta(days=2), TODAY)]
+
+
+def test_claim_made_while_unsettled_is_reverified():
+    # 永久空洞回归测试（2026-06-11 中国联通事故）：昨日盘后数据源尚未更新时
+    # 抓过昨日（水位声明到 6/10、抓取时刻为昨日 17:00），该日如今已定型——
+    # 仍须以"上次抓取时的定型边界"为起点重新核实，而不是判永久有效
+    yesterday = TODAY - timedelta(days=1)
+    fetched_at_17pm = int((NOW - datetime(2026, 6, 10, 17, 0, 0, tzinfo=CST)).total_seconds())
+    w = wm(date(2020, 1, 1), yesterday, fetched_ago_seconds=fetched_at_17pm)
+    d = check_range(w, "k_d", yesterday, yesterday, NOW)
+    assert d.fetch_ranges == [(yesterday, yesterday)]
+
+
 # ── 周/月线定型边界 ──
 
 
@@ -91,9 +120,18 @@ def test_weekly_settled_boundary_is_monday():
 
 
 def test_weekly_past_week_fresh_even_if_old_fetch():
-    w = wm(date(2020, 1, 1), date(2026, 6, 5), fetched_ago_seconds=10**6)
+    # 3 天前（本周一 6/8）抓的：上周（~6/5）当时已定型，永久有效
+    w = wm(date(2020, 1, 1), date(2026, 6, 5), fetched_ago_seconds=3 * 86400)
     d = check_range(w, "k_w", date(2026, 5, 1), date(2026, 6, 5), NOW)
     assert d.fresh  # 上周五收的周线已定型
+
+
+def test_weekly_bar_fetched_midweek_reverified():
+    # 上周四（6/4）抓到的 6/5 周线 bar 当时尚未定型（周线按周定型），重新核实
+    fetched_thu = int((NOW - datetime(2026, 6, 4, 15, 0, 0, tzinfo=CST)).total_seconds())
+    w = wm(date(2020, 1, 1), date(2026, 6, 5), fetched_ago_seconds=fetched_thu)
+    d = check_range(w, "k_w", date(2026, 5, 1), date(2026, 6, 5), NOW)
+    assert d.fetch_ranges == [(date(2026, 6, 1), date(2026, 6, 5))]
 
 
 def test_weekly_current_week_stale():
@@ -158,7 +196,8 @@ def test_quarter_empty_in_window_rechecks_daily():
 
 
 def test_macro_settled_after_60_days():
-    w = wm(date(2020, 1, 1), TODAY - timedelta(days=90), fetched_ago_seconds=10**7)
+    # 30 天前抓的：彼时沉淀期边界为 fetch-60 天，请求的 90 天前数据已定型
+    w = wm(date(2020, 1, 1), TODAY - timedelta(days=90), fetched_ago_seconds=30 * 86400)
     d = check_range(w, "money_supply_month", date(2025, 1, 1), TODAY - timedelta(days=90), NOW)
     assert d.fresh
 
@@ -167,8 +206,8 @@ def test_macro_recent_stale_weekly():
     w = wm(date(2020, 1, 1), TODAY, fetched_ago_seconds=8 * 86400)  # 8 天前
     d = check_range(w, "deposit_rate", date(2026, 1, 1), TODAY, NOW)
     assert not d.fresh
-    # 刷新区从沉淀期边界起
-    assert d.fetch_ranges[0][0] == TODAY - timedelta(days=59)
+    # 刷新区从**上次抓取时**的沉淀期边界起（8 天前抓的 → 8+59 天前起）
+    assert d.fetch_ranges[0][0] == TODAY - timedelta(days=8 + 59)
 
 
 def test_macro_recent_fresh_within_week():
@@ -188,10 +227,10 @@ def test_calendar_future_not_clamped():
 
 
 def test_calendar_stale_refreshes_unsettled_and_merges_tail():
-    # 过期水位：今天起的未定型区段（临时调整可能）与尾部缺口合并重抓
+    # 过期水位：上次抓取日（2 天前）起的未定型区段（临时调整可能）与尾部缺口合并重抓
     w = wm(date(2024, 1, 1), date(2026, 6, 30), fetched_ago_seconds=2 * 86400)
     d = check_range(w, "trade_calendar", date(2026, 1, 1), date(2026, 12, 31), NOW)
-    assert d.fetch_ranges == [(TODAY, date(2026, 12, 31))]
+    assert d.fetch_ranges == [(TODAY - timedelta(days=2), date(2026, 12, 31))]
 
 
 # ── 快照类 ──
@@ -217,6 +256,29 @@ def test_snapshot_today_fresh():
     w = wm(TODAY, TODAY, fetched_ago_seconds=3600)
     d = check_snapshot(w, "stock_list", TODAY, has_rows=True, now=NOW)
     assert d.fresh
+
+
+# ── 写侧水位声明规则（claimable_last） ──
+
+
+def test_claim_empty_unsettled_tail_not_claimed():
+    # 空结果抓当日（未定型）：只声明到定型边界，当日留待重抓
+    assert claimable_last("k_d", TODAY, None, TODAY) == TODAY - timedelta(days=1)
+
+
+def test_claim_actual_data_claims_through_actual():
+    # 实际返回了当日数据：声明到当日
+    assert claimable_last("k_d", TODAY, TODAY, TODAY) == TODAY
+
+
+def test_claim_empty_settled_range_claimed():
+    # 定型区的空结果（停牌/退市）照常声明，防止反复重抓
+    assert claimable_last("k_d", date(2026, 6, 1), None, TODAY) == date(2026, 6, 1)
+
+
+def test_claim_weekly_caps_at_week_boundary():
+    # 周线本周内的空结果只声明到上周日（2026-06-11 为周四）
+    assert claimable_last("k_w", TODAY, None, TODAY) == date(2026, 6, 7)
 
 
 def test_future_range_not_refetched():
