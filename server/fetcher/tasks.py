@@ -5,8 +5,10 @@ fetcher 任务定义（设计文档 4.2 节）。
 → 标记 succeeded/failed。
 
 约定：
-- NoDataFoundError 对范围/列表类查询是合法的 0 行结果：照常更新水位（声明
-  "该范围已检查过，没有数据"），防止读穿透反复触发抓取。
+- NoDataFoundError 对范围/列表类查询是合法的 0 行结果：**定型区**照常更新水位
+  （声明"该范围已检查过，没有数据"），防止读穿透反复触发抓取；**未定型尾部**
+  只声明实际返回的数据（db/coverage.claimable_last），数据源尚未发布的日期
+  留待后续重抓，避免形成永久空洞。
 - DataSourceError 自动重试（退避，最多 2 次）；重试耗尽才标记 failed。
 - 所有日期参数为 'YYYY-MM-DD' 字符串（货币供应量为 'YYYY-MM' / 'YYYY'）。
 - 快照类任务（股票列表/成分股/行业）的 snap_date 由调用方解析为具体交易日。
@@ -19,6 +21,7 @@ from zoneinfo import ZoneInfo
 from billiard.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import update as sa_update
 
+from db.coverage import claimable_last
 from db.models import DataType, FetchTask, TaskStatus
 from db.session import SyncSession
 from fetcher import writer
@@ -39,9 +42,12 @@ def _d(s: str) -> date:
     return datetime.strptime(s, "%Y-%m-%d").date()
 
 
-def _clamp_last(end_date: str) -> date:
-    """水位的业务日期不超过今天（请求范围可能含未来）。"""
-    return min(_d(end_date), _today())
+def _max_date_str(df, col: str) -> date | None:
+    """DataFrame 中 'YYYY-MM-DD' 字符串列的最大日期（字典序即日期序），无数据返回 None。"""
+    if df is None or len(df) == 0 or col not in df:
+        return None
+    vals = [str(v) for v in df[col].tolist() if v]
+    return _d(max(vals)) if vals else None
 
 
 def _now() -> datetime:
@@ -102,11 +108,15 @@ def fetch_kline(self, code: str, start_date: str, end_date: str,
             df = provider.query_k_data(code, start_date, end_date, frequency)
         except NoDataFoundError:
             df = None
+        data_type = DataType.from_k_frequency(frequency)
         with SyncSession.begin() as s:
             n = writer.write_kline(s, df, code, frequency) if df is not None else 0
             writer.update_watermark(
-                s, DataType.from_k_frequency(frequency),
-                last_date=_clamp_last(end_date), first_date=_d(start_date), code=code,
+                s, data_type,
+                last_date=claimable_last(
+                    data_type, _d(end_date), _max_date_str(df, "date"), _today()
+                ),
+                first_date=_d(start_date), code=code,
             )
         return {"rows": n}
 
@@ -121,11 +131,19 @@ def fetch_kline_minute(self, code: str, start_date: str, end_date: str,
             df = provider.query_k_data(code, start_date, end_date, str(frequency))
         except NoDataFoundError:
             df = None
+        # 分钟线 time 列为 YYYYMMDDHHMMSSsss，取前 8 位作业务日期
+        actual_last = None
+        if df is not None and len(df) and "time" in df:
+            vals = [str(v) for v in df["time"].tolist() if v]
+            if vals:
+                actual_last = datetime.strptime(max(vals)[:8], "%Y%m%d").date()
+        data_type = DataType.from_k_frequency(str(frequency))
         with SyncSession.begin() as s:
             n = writer.write_kline_minute(s, df, code, frequency) if df is not None else 0
             writer.update_watermark(
-                s, DataType.from_k_frequency(str(frequency)),
-                last_date=_clamp_last(end_date), first_date=_d(start_date), code=code,
+                s, data_type,
+                last_date=claimable_last(data_type, _d(end_date), actual_last, _today()),
+                first_date=_d(start_date), code=code,
             )
         return {"rows": n}
 
@@ -147,7 +165,11 @@ def fetch_adjust_factor(self, code: str, start_date: str, end_date: str,
             n = writer.write_adjust_factor(s, df, code) if df is not None else 0
             writer.update_watermark(
                 s, DataType.ADJUST_FACTOR,
-                last_date=_clamp_last(end_date), first_date=_d(start_date), code=code,
+                last_date=claimable_last(
+                    DataType.ADJUST_FACTOR, _d(end_date),
+                    _max_date_str(df, "dividOperateDate"), _today(),
+                ),
+                first_date=_d(start_date), code=code,
             )
         return {"rows": n}
 
@@ -233,7 +255,8 @@ def fetch_performance_report(self, code: str, start_date: str, end_date: str,
                     pass  # 范围内无快报/预告是常态
                 writer.update_watermark(
                     s, report_type,
-                    last_date=_clamp_last(end_date), first_date=_d(start_date), code=code,
+                    last_date=claimable_last(report_type, _d(end_date), None, _today()),
+                    first_date=_d(start_date), code=code,
                 )
         return {"rows": total}
 
