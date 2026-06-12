@@ -47,7 +47,13 @@ def submit(task_name: str, params: dict) -> tuple[int | None, str | None]:
         ).scalar()
     if row_id is None:
         return None, None  # 同参数任务已在队列中
-    result = celery_app.send_task(task_name, kwargs={**params, "fetch_task_id": row_id})
+    try:
+        result = celery_app.send_task(task_name, kwargs={**params, "fetch_task_id": row_id})
+    except Exception as e:
+        # broker 投递失败必须立即标记 failed 释放部分唯一索引，否则 pending 行
+        # 会阻塞同参数任务的重新投递，直到僵尸防护超时才被清理
+        _mark_failed(row_id, f"broker 投递失败: {e}")
+        raise FetchFailedError(f"{task_name} {params}: broker 投递失败: {e}") from e
     # 投递后立即回写 celery_task_id（_run 在任务开始执行时才写），
     # 让 pending 行也能关联到 broker 消息，便于观测与僵尸排查
     with SyncSession.begin() as s:

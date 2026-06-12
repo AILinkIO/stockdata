@@ -22,6 +22,7 @@ from db.models import (
     StockIndustry,
     StockListSnapshot,
     TradeCalendar,
+    model_columns,
 )
 from db.session import SyncSession
 
@@ -139,7 +140,7 @@ def get_macro_rates(kind: str, start: date, end: date) -> list[dict]:
     """存款利率 / 贷款利率 / 存款准备金率。"""
     ensure_range(kind, start, end)
     model, date_col = _MACRO_READERS[kind]
-    cols = [c.name for c in model.__table__.columns if c.name != "updated_at"]
+    cols = model_columns(model)
     return _rows(
         select(model).where(date_col >= start, date_col <= end).order_by(date_col),
         cols,
@@ -148,7 +149,7 @@ def get_macro_rates(kind: str, start: date, end: date) -> list[dict]:
 
 def get_money_supply_month(start: date, end: date) -> list[dict]:
     ensure_range("money_supply_month", start, end)
-    cols = [c.name for c in MoneySupplyMonth.__table__.columns if c.name != "updated_at"]
+    cols = model_columns(MoneySupplyMonth)
     ym = tuple_(MoneySupplyMonth.stat_year, MoneySupplyMonth.stat_month)
     return _rows(
         select(MoneySupplyMonth)
@@ -160,7 +161,7 @@ def get_money_supply_month(start: date, end: date) -> list[dict]:
 
 def get_money_supply_year(start_year: int, end_year: int) -> list[dict]:
     ensure_range("money_supply_year", date(start_year, 1, 1), date(end_year, 1, 1))
-    cols = [c.name for c in MoneySupplyYear.__table__.columns if c.name != "updated_at"]
+    cols = model_columns(MoneySupplyYear)
     return _rows(
         select(MoneySupplyYear)
         .where(MoneySupplyYear.stat_year >= start_year,

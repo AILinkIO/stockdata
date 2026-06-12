@@ -8,6 +8,7 @@ from fastapi.responses import PlainTextResponse
 
 from api.services import analysis, kline, market
 from core.helpers import normalize_stock_code_logic
+from fetcher.providers.interface import NoDataFoundError
 
 router = APIRouter(prefix="/api/v1/stocks", tags=["stocks"])
 
@@ -40,8 +41,6 @@ def get_basic(code: str):
     code = normalize_stock_code_logic(code)
     info = market.get_stock_basic(code)
     if info is None:
-        from fetcher.providers.interface import NoDataFoundError
-
         raise NoDataFoundError(f"未找到股票 {code} 的基本信息")
     return info
 

@@ -12,7 +12,7 @@ from decimal import Decimal
 from sqlalchemy import select
 
 from api.services.readthrough import ensure_range
-from db.models import AdjustFactor, Kline, KlineMinute
+from db.models import AdjustFactor, Kline, KlineMinute, model_columns
 from db.session import SyncSession
 
 _PRICE_COLS = ("open", "high", "low", "close", "preclose")
@@ -21,8 +21,8 @@ _PRICE_COLS = ("open", "high", "low", "close", "preclose")
 def _row_dict(obj, cols) -> dict:
     return {c: getattr(obj, c) for c in cols}
 
-_K_COLS = [c.name for c in Kline.__table__.columns if c.name != "updated_at"]
-_KM_COLS = [c.name for c in KlineMinute.__table__.columns if c.name != "updated_at"]
+_K_COLS = model_columns(Kline)
+_KM_COLS = model_columns(KlineMinute)
 
 
 def get_adjust_factors(code: str, start: date, end: date) -> list[dict]:

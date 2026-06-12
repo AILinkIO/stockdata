@@ -5,17 +5,11 @@ from datetime import date
 from sqlalchemy import select
 
 from api.services.readthrough import ensure_quarter, ensure_range
+from db.coverage import quarter_end
 from db.models import FinancialReport
 from db.session import SyncSession
 
 QUARTERLY_TYPES = ("profit", "operation", "growth", "balance", "cash_flow", "dupont")
-
-_QUARTER_END = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}
-
-
-def quarter_end(year: int, quarter: int) -> date:
-    m, d = _QUARTER_END[quarter]
-    return date(year, m, d)
 
 
 def get_quarterly(code: str, year: int, quarter: int,
