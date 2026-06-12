@@ -14,6 +14,7 @@ namespace StockData.Mcp.Indicators;
 /// 已支持：
 ///   RSI  → MCP 工具 get_rsi
 ///   OBV  → MCP 工具 get_obv
+///   EMA  → MCP 工具 get_vegas_channel / get_dual_ma
 ///   CCI  → 内部使用（不暴露 MCP），供后续指标服务层按需调用
 /// </summary>
 public static class TalibComputer
