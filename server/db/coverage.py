@@ -96,6 +96,12 @@ def claimable_last(
     return claimed
 
 
+def quarter_end(year: int, quarter: int) -> date:
+    """季度报告期（财报 stat_date）：Q1→3/31、Q2→6/30、Q3→9/30、Q4→12/31。"""
+    m, d = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}[quarter]
+    return date(year, m, d)
+
+
 def quarter_disclosure_deadline(year: int, quarter: int) -> date:
     """季报披露截止日：Q1→4/30、Q2→8/31、Q3→10/31、Q4→次年 4/30。"""
     deadlines = {
@@ -184,8 +190,8 @@ def check_quarter(
     - last_success：fetch_task 中该 (code, year, quarter) 最近一次成功抓取时刻
       （兼作"已查过但确实没有"的负结果记忆）。
     """
-    m, d = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}[quarter]
-    quarter_range = [(date(year, m - 2, 1), date(year, m, d))]
+    q_end = quarter_end(year, quarter)
+    quarter_range = [(date(year, q_end.month - 2, 1), q_end)]
     deadline = quarter_disclosure_deadline(year, quarter)
     settled = now.date() > deadline
 

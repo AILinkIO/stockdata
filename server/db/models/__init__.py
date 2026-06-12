@@ -45,3 +45,8 @@ __all__ = [
     "DataWatermark",
     "FetchTask",
 ]
+
+
+def model_columns(model, exclude: tuple[str, ...] = ("updated_at",)) -> list[str]:
+    """模型的列名列表（默认剔除 updated_at 审计列），用于行 → dict 投影。"""
+    return [c.name for c in model.__table__.columns if c.name not in exclude]
