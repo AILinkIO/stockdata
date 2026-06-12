@@ -16,11 +16,11 @@ fetcher 任务定义（设计文档 4.2 节）。
 
 import logging
 from datetime import date, datetime, timezone
-from zoneinfo import ZoneInfo
 
 from billiard.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import update as sa_update
 
+from core.timeutil import today_cst as _today
 from db.coverage import claimable_last
 from db.models import DataType, FetchTask, TaskStatus
 from db.session import SyncSession
@@ -31,15 +31,18 @@ from fetcher.providers.interface import DataSourceError, NoDataFoundError
 
 logger = logging.getLogger(__name__)
 
-_CST = ZoneInfo("Asia/Shanghai")
-
-
-def _today() -> date:
-    return datetime.now(_CST).date()
-
 
 def _d(s: str) -> date:
     return datetime.strptime(s, "%Y-%m-%d").date()
+
+
+def _query_or_none(query, *args, **kwargs):
+    """范围/列表类查询的合法空结果（NoDataFoundError）折叠为 None，由调用方决定
+    空结果语义（多数任务照常推进水位，声明"已检查过，没有数据"）。"""
+    try:
+        return query(*args, **kwargs)
+    except NoDataFoundError:
+        return None
 
 
 def _max_date_str(df, col: str) -> date | None:
@@ -104,10 +107,7 @@ def _run(task, fetch_task_id: int | None, impl) -> dict:
 def fetch_kline(self, code: str, start_date: str, end_date: str,
                 frequency: str = "d", fetch_task_id: int | None = None) -> dict:
     def impl() -> dict:
-        try:
-            df = provider.query_k_data(code, start_date, end_date, frequency)
-        except NoDataFoundError:
-            df = None
+        df = _query_or_none(provider.query_k_data, code, start_date, end_date, frequency)
         data_type = DataType.from_k_frequency(frequency)
         with SyncSession.begin() as s:
             n = writer.write_kline(s, df, code, frequency) if df is not None else 0
@@ -127,10 +127,7 @@ def fetch_kline(self, code: str, start_date: str, end_date: str,
 def fetch_kline_minute(self, code: str, start_date: str, end_date: str,
                        frequency: int = 30, fetch_task_id: int | None = None) -> dict:
     def impl() -> dict:
-        try:
-            df = provider.query_k_data(code, start_date, end_date, str(frequency))
-        except NoDataFoundError:
-            df = None
+        df = _query_or_none(provider.query_k_data, code, start_date, end_date, str(frequency))
         # 分钟线 time 列为 YYYYMMDDHHMMSSsss，取前 8 位作业务日期
         actual_last = None
         if df is not None and len(df) and "time" in df:
@@ -157,10 +154,7 @@ def fetch_kline_minute(self, code: str, start_date: str, end_date: str,
 def fetch_adjust_factor(self, code: str, start_date: str, end_date: str,
                         fetch_task_id: int | None = None) -> dict:
     def impl() -> dict:
-        try:
-            df = provider.query_adjust_factor(code, start_date, end_date)
-        except NoDataFoundError:
-            df = None  # 从未除权是合法状态
+        df = _query_or_none(provider.query_adjust_factor, code, start_date, end_date)  # 从未除权是合法状态
         with SyncSession.begin() as s:
             n = writer.write_adjust_factor(s, df, code) if df is not None else 0
             writer.update_watermark(
@@ -192,10 +186,7 @@ def fetch_stock_basic(self, code: str, fetch_task_id: int | None = None) -> dict
 def fetch_dividend(self, code: str, year: int, year_type: str = "report",
                    fetch_task_id: int | None = None) -> dict:
     def impl() -> dict:
-        try:
-            df = provider.query_dividend(code, str(year), year_type)
-        except NoDataFoundError:
-            df = None  # 该年无分红是合法状态
+        df = _query_or_none(provider.query_dividend, code, str(year), year_type)  # 该年无分红是合法状态
         with SyncSession.begin() as s:
             n = writer.write_dividend(s, df, code, year, year_type) if df is not None else 0
             writer.update_watermark(
@@ -209,8 +200,6 @@ def fetch_dividend(self, code: str, year: int, year_type: str = "report",
 
 
 # ── 财报 ──
-
-_QUARTER_END = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}
 
 
 @app.task(name="fetcher.fetch_financial_report", **_TASK_OPTS)
@@ -245,14 +234,12 @@ def fetch_performance_report(self, code: str, start_date: str, end_date: str,
                 ("forecast", provider.query_forecast,
                  "profitForcastExpStatDate", "profitForcastExpPubDate"),
             ):
-                try:
-                    df = query(code, start_date, end_date)
+                df = _query_or_none(query, code, start_date, end_date)  # 范围内无快报/预告是常态
+                if df is not None:
                     total += writer.write_financial_reports(
                         s, code, report_type, df.to_dict("records"),
                         stat_key=stat_key, pub_key=pub_key,
                     )
-                except NoDataFoundError:
-                    pass  # 范围内无快报/预告是常态
                 writer.update_watermark(
                     s, report_type,
                     last_date=claimable_last(report_type, _d(end_date), None, _today()),
@@ -286,9 +273,8 @@ def fetch_trade_calendar(self, start_date: str, end_date: str,
 @app.task(name="fetcher.fetch_stock_list", **_TASK_OPTS)
 def fetch_stock_list(self, snap_date: str, fetch_task_id: int | None = None) -> dict:
     def impl() -> dict:
-        try:
-            df = provider.query_all_stock(snap_date)
-        except NoDataFoundError:
+        df = _query_or_none(provider.query_all_stock, snap_date)
+        if df is None:
             # 当日列表盘中尚未发布是常态：0 行返回，不记水位（API 层回退前一交易日）
             return {"rows": 0}
         with SyncSession.begin() as s:
@@ -363,10 +349,7 @@ def debug_probe(self, sleep_seconds: int = 0, code: str = "") -> dict:
 def fetch_macro(self, kind: str, start_date: str, end_date: str,
                 fetch_task_id: int | None = None) -> dict:
     def impl() -> dict:
-        try:
-            df = provider.query_macro(kind, start_date, end_date)
-        except NoDataFoundError:
-            df = None
+        df = _query_or_none(provider.query_macro, kind, start_date, end_date)
         first, last = _macro_dates(kind, start_date, end_date)
         with SyncSession.begin() as s:
             n = writer.write_macro(s, df, kind) if df is not None else 0

@@ -6,22 +6,16 @@
 """
 
 import logging
-from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import date, timedelta
 
 from sqlalchemy import select
 
+from core.timeutil import today_cst as _today
 from db.models import TradeCalendar
 from db.session import SyncSession
 from fetcher.app import app
 
 logger = logging.getLogger(__name__)
-
-_CST = ZoneInfo("Asia/Shanghai")
-
-
-def _today() -> date:
-    return datetime.now(_CST).date()
 
 
 def _is_trading_day(d: date) -> bool:
@@ -114,23 +108,21 @@ def sync_tracked_codes() -> dict:
         ).all()
 
     for code, data_type, last_date in rows:
-        start = last_date.isoformat()  # 含 last_date：覆写可能的盘中数据
-        end = t.isoformat()
+        # 含 last_date：覆写可能的盘中数据
+        params = {"code": code, "start_date": last_date.isoformat(), "end_date": t.isoformat()}
         if data_type in k_types:
-            ok = _submit("fetcher.fetch_kline", {
-                "code": code, "start_date": start, "end_date": end,
-                "frequency": k_types[data_type],
-            })
+            task_name = "fetcher.fetch_kline"
+            params["frequency"] = k_types[data_type]
         elif data_type in minute_types:
-            ok = _submit("fetcher.fetch_kline_minute", {
-                "code": code, "start_date": start, "end_date": end,
-                "frequency": minute_types[data_type],
-            })
+            task_name = "fetcher.fetch_kline_minute"
+            params["frequency"] = minute_types[data_type]
         else:  # adjust_factor：除权事件检测
-            ok = _submit("fetcher.fetch_adjust_factor", {
-                "code": code, "start_date": start, "end_date": end,
-            })
-        dispatched += ok
+            task_name = "fetcher.fetch_adjust_factor"
+        try:
+            dispatched += _submit(task_name, params)
+        except Exception:
+            # 单标的投递失败（瞬时 DB/broker 故障）不中断其余标的的同步
+            logger.exception("增量任务投递失败，跳过 %s %s", code, data_type)
 
     logger.info("已入库代码同步：投递 %d 个增量任务", dispatched)
     return {"dispatched": dispatched}

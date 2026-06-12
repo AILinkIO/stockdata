@@ -11,12 +11,13 @@ baostock 全部返回字符串，本模块负责类型解析（→ Decimal/date/
 import logging
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 from sqlalchemy import func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
+
+from core.timeutil import CST as _CST
 
 from db.models import (
     AdjustFactor,
@@ -39,7 +40,6 @@ from db.models import (
 
 logger = logging.getLogger(__name__)
 
-_CST = ZoneInfo("Asia/Shanghai")
 _CHUNK = 1000
 
 
