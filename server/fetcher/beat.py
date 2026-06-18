@@ -116,8 +116,8 @@ def sync_tracked_codes() -> dict:
         elif data_type in minute_types:
             task_name = "fetcher.fetch_kline_minute"
             params["frequency"] = minute_types[data_type]
-        else:  # adjust_factor：除权事件检测
-            task_name = "fetcher.fetch_adjust_factor"
+        else:  # adjust_factor：fetch_adjust_factor 恒整段重抓（忽略此处窗口），
+            task_name = "fetcher.fetch_adjust_factor"  # 捕获新除权对历史 fore 的全量重算
         try:
             dispatched += _submit(task_name, params)
         except Exception:

@@ -21,7 +21,7 @@ from billiard.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import update as sa_update
 
 from core.timeutil import today_cst as _today
-from db.coverage import claimable_last
+from db.coverage import backfill_start, claimable_last
 from db.models import DataType, FetchTask, TaskStatus
 from db.session import SyncSession
 from fetcher import writer
@@ -153,8 +153,20 @@ def fetch_kline_minute(self, code: str, start_date: str, end_date: str,
 @app.task(name="fetcher.fetch_adjust_factor", **_TASK_OPTS)
 def fetch_adjust_factor(self, code: str, start_date: str, end_date: str,
                         fetch_task_id: int | None = None) -> dict:
+    """复权因子**必须整段抓取**，传入 start_date 仅用于派发/去重，不参与查询。
+
+    baostock 的 foreAdjustFactor 按"最新除权事件"归一（fore(d)=back(d)/back(最新事件)），
+    每新增一次除权除息，**整条历史 fore 序列都会被重算下移**。若按 [水位, 今天] 增量
+    窗口抓取，只会覆盖窗口内的行，更早的 fore 全部停留在旧值（前复权 K 线在新除权日
+    出现假缺口、指标算出假涨跌）。故恒从 A 股开市日全量拉取并整表 upsert 覆盖——
+    baostock 单次即返回完整序列，请求数不变（每 code 每次仍一次调用）。
+    """
+    full_start = backfill_start(DataType.ADJUST_FACTOR)
+
     def impl() -> dict:
-        df = _query_or_none(provider.query_adjust_factor, code, start_date, end_date)  # 从未除权是合法状态
+        df = _query_or_none(  # 从未除权是合法状态
+            provider.query_adjust_factor, code, full_start.isoformat(), end_date
+        )
         with SyncSession.begin() as s:
             n = writer.write_adjust_factor(s, df, code) if df is not None else 0
             writer.update_watermark(
@@ -163,7 +175,7 @@ def fetch_adjust_factor(self, code: str, start_date: str, end_date: str,
                     DataType.ADJUST_FACTOR, _d(end_date),
                     _max_date_str(df, "dividOperateDate"), _today(),
                 ),
-                first_date=_d(start_date), code=code,
+                first_date=full_start, code=code,
             )
         return {"rows": n}
 
