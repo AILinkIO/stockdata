@@ -1,13 +1,10 @@
 # stockdata 全栈混合部署（仓库根目录，一键拉起见 ./up.sh）：
 #   - PostgreSQL 与 Valkey(Redis) 使用物理机服务（127.0.0.1）
-#   - api / fetcher 分片 / beat（server/）+ mcp（dotnet-mcp/）在容器中
+#   - api / worker / beat（server/）+ mcp（dotnet-mcp/）在容器中
 # 容器走 host 网络直连本机服务，server/.env 中的 127.0.0.1 DSN 零改动。
 #
 #   ./up.sh                       # 等价于 sudo docker compose up -d --build
 #   sudo docker compose ps
-#
-# 注意：fetcher 分片数 = settings.worker_shards（默认 3），
-# 调整时需同步增减 fetcher-shardN 服务。
 
 name: stockdata
 
@@ -15,7 +12,7 @@ x-app: &app
   image: stockdata-server
   build: ./server
   network_mode: host        # 直连物理机 127.0.0.1 的 PG/Valkey
-  env_file: server/.env     # 注入 STOCKDATA_*（DSN、队列地址、fetcher 参数）
+  env_file: server/.env     # 注入 STOCKDATA_*（DSN、队列地址）
   restart: unless-stopped
   depends_on:
     migrate:
@@ -23,7 +20,7 @@ x-app: &app
 
 x-fetcher: &fetcher
   <<: *app
-  stop_grace_period: 120s   # Celery 优雅退出：等在执行的任务完成（≤ task_time_limit）
+  stop_grace_period: 120s   # Celery 优雅退出：等在执行的任务完成
 
 services:
   # 一次性：建/升级 schema 后退出，其余服务等它成功才启动
@@ -45,20 +42,12 @@ services:
       timeout: 5s
       retries: 3
 
-  # 分片 worker：同 code 同任务类型恒定路由到同一分片（单进程，详见设计文档偏差 11）
-  fetcher-shard0:
+  # 单 worker（solo pool，串行执行）：baostock 单线程约束
+  worker:
     <<: *fetcher
-    command: uv run celery -A fetcher.app worker -Q shard0 -n shard0@%h -c 1 --loglevel=info
+    command: uv run celery -A fetcher.app worker --pool=solo --concurrency=1 --loglevel=info
 
-  fetcher-shard1:
-    <<: *fetcher
-    command: uv run celery -A fetcher.app worker -Q shard1 -n shard1@%h -c 1 --loglevel=info
-
-  fetcher-shard2:
-    <<: *fetcher
-    command: uv run celery -A fetcher.app worker -Q shard2 -n shard2@%h -c 1 --loglevel=info
-
-  # 定时调度器：全局仅此一个实例；状态文件放容器内 /tmp（可丢，beat 不补发错过的任务）
+  # 定时调度器：全局仅此一个实例；状态文件放容器内 /tmp
   beat:
     <<: *app
     command: uv run celery -A fetcher.app beat -s /tmp/celerybeat-schedule --loglevel=info

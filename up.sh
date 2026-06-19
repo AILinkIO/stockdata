@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 一键构建并拉起全栈：migrate → api / fetcher×3 / beat（server/）+ mcp（dotnet-mcp/）。
+# 一键构建并拉起全栈：migrate → api / worker / beat（server/）+ mcp（dotnet-mcp/）。
 # 透传 docker compose up 的额外参数，如 ./up.sh mcp 只拉起单个服务。
 set -euo pipefail
 cd "$(dirname "$0")"
