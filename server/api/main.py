@@ -2,15 +2,18 @@
 A股数据 Web 服务入口。
 
 启动方式（本工程目录 server/ 下）:
-    uv run uvicorn api.main:app --host 0.0.0.0 --port 8000
+    uv run uvicorn api.main:app --host 0.0.0.0 --port 8080
 
-接口文档: http://localhost:8000/docs
+接口文档: http://localhost:8080/docs
 
 实现说明：路由为同步函数（FastAPI 自动调度到线程池），读穿透中等待
 Celery 结果的阻塞不影响事件循环；数据访问使用同步 SQLAlchemy session。
+Celery worker 以 solo pool 运行在 API 进程的 daemon thread 中（嵌入式），
+无需独立 worker 进程。
 """
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
@@ -23,10 +26,19 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    from fetcher.worker import start_embedded
+    start_embedded()
+    yield
+
+
 app = FastAPI(
     title="stockdata",
     description="中国 A 股市场数据服务（Baostock 数据源 + PostgreSQL 数据仓库）",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 register_exception_handlers(app)
