@@ -1,7 +1,7 @@
 # stockdata
 
 中国 A 股市场数据服务。数据源为 [Baostock](http://baostock.com/)，
-PostgreSQL 做数据仓库，Celery（嵌入式 worker，API 进程内 solo pool 串行执行）负责抓取任务的队列调度，
+PostgreSQL 做数据仓库，Celery（嵌入式 worker + beat，API 进程内 solo pool 串行执行）负责抓取任务的队列调度与定时同步，
 FastAPI 对外提供 REST 接口。
 
 文档：[API 参考](docs/api.md) · [数据生命周期（读穿透/缺口补抓/复权）](docs/data-lifecycle.md) · [架构设计](docs/refactor-design.md)
@@ -23,16 +23,15 @@ FastAPI 对外提供 REST 接口。
 ## 架构
 
 ```
-HTTP ──▶ api/（FastAPI + 内嵌 Celery worker）──读──▶ PostgreSQL
+HTTP ──▶ api/（FastAPI + 内嵌 Celery worker + beat）──读──▶ PostgreSQL
                │ 缺数据时投递任务到进程内队列              ▲
                │（daemon thread, solo pool 串行执行）     │ 写
+               │ beat 定时调度（收盘后同步市场数据）       │
                └─────▶ Redis 队列 ────────────────────────┘
-                         ▲
-               beat（定时同步调度，独立进程）
 ```
 
-- **嵌入式 worker**：Celery worker 以 solo pool 运行在 API 进程的 daemon thread 中，
-  无需独立 worker 进程/容器。任务串行执行，天然满足 baostock 单线程约束。
+- **嵌入式 worker + beat**：Celery worker 和 beat 均运行在 API 进程的 daemon thread 中，
+  无需独立进程/容器。任务串行执行，天然满足 baostock 单线程约束；beat 定时投递同步任务。
 - API 读穿透：缺数据时 `send_task()` 投递到 Redis 队列，`AsyncResult.get()` 阻塞等待结果；
   同参数的 pending/running 任务由部分唯一索引去重，撞重复时轮询等待已有任务完成。
 - 批量回填：`POST /api/v1/tasks/backfill` 返回 202 + task_id，客户端轮询 `GET /api/v1/tasks/{id}`。
@@ -59,13 +58,12 @@ uv sync
 uv run alembic upgrade head
 
 # 启动方式一：Docker Compose（推荐；compose.yaml 在仓库根目录，含 mcp 服务）
-# PG/Valkey 用物理机服务，api（内嵌 worker）/beat 在容器（host 网络直连 127.0.0.1）；
+# PG/Valkey 用物理机服务，api（内嵌 worker + beat）在容器（host 网络直连 127.0.0.1）；
 # migrate 服务先跑 alembic upgrade head，成功后其余服务才启动
 cd .. && ./up.sh          # 等价于 sudo docker compose up -d --build
 
 # 启动方式二：裸机进程（开发/调试）
-uv run uvicorn api.main:app --host 0.0.0.0 --port 8080  # API（内嵌 Celery worker）
-uv run celery -A fetcher.app beat --loglevel=info       # 定时同步（独立进程）
+uv run uvicorn api.main:app --host 0.0.0.0 --port 8080  # API（内嵌 Celery worker + beat）
 # 裸机常驻可用 systemd 单元（deploy/）；
 # 两种方式二选一，不可同时运行（端口会冲突）
 ```
@@ -91,9 +89,9 @@ api/                  # FastAPI 应用
 ├── routers/          # REST 路由（行情/财报/指数/市场/宏观/日期/工具/任务）
 ├── services/         # 读穿透编排、复权计算、财报合并、交易日工具
 └── errors.py         # 领域异常 → HTTP 状态码
-fetcher/              # Celery 任务体系（嵌入式 worker，API 进程内 solo pool 串行执行）
+fetcher/              # Celery 任务体系（嵌入式 worker + beat，API 进程内 solo pool 串行执行）
 ├── app.py            # Celery 实例 + beat 调度表
-├── worker.py         # 嵌入式 worker 启动（daemon thread）
+├── worker.py         # 嵌入式 worker + beat 启动（daemon thread）
 ├── tasks.py          # 抓取任务（查询 → 解析 → upsert → 水位更新）
 ├── beat.py           # 定时同步任务
 └── providers/        # Baostock 查询函数
@@ -102,7 +100,7 @@ db/
 ├── coverage.py       # 覆盖度/新鲜度规则
 └── alembic/          # schema 迁移
 core/                 # 代码标准化等纯逻辑
-deploy/               # systemd 单元（api / beat）
+deploy/               # systemd 单元（api）
 ```
 
 ## 运维

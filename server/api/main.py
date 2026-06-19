@@ -8,8 +8,8 @@ A股数据 Web 服务入口。
 
 实现说明：路由为同步函数（FastAPI 自动调度到线程池），读穿透中等待
 Celery 结果的阻塞不影响事件循环；数据访问使用同步 SQLAlchemy session。
-Celery worker 以 solo pool 运行在 API 进程的 daemon thread 中（嵌入式），
-无需独立 worker 进程。
+Celery worker + beat 以 solo pool 运行在 API 进程的 daemon thread 中（嵌入式），
+无需独立 worker / beat 进程。
 """
 
 import logging

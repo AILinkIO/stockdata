@@ -1,6 +1,6 @@
 # stockdata 全栈混合部署（仓库根目录，一键拉起见 ./up.sh）：
 #   - PostgreSQL 与 Valkey(Redis) 使用物理机服务（127.0.0.1）
-#   - api（内嵌 Celery worker）/ beat（server/）+ mcp（dotnet-mcp/）在容器中
+#   - api（内嵌 Celery worker + beat）/ mcp（dotnet-mcp/）在容器中
 # 容器走 host 网络直连本机服务，server/.env 中的 127.0.0.1 DSN 零改动。
 #
 #   ./up.sh                       # 等价于 sudo docker compose up -d --build
@@ -28,7 +28,7 @@ services:
     command: uv run alembic upgrade head
     restart: "no"
 
-  # API + 内嵌 Celery worker（daemon thread，solo pool 串行执行）
+  # API + 内嵌 Celery worker + beat（daemon thread，solo pool 串行执行 + 定时调度）
   api:
     <<: *app
     stop_grace_period: 120s
@@ -39,11 +39,6 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-
-  # 定时调度器：全局仅此一个实例；状态文件放容器内 /tmp
-  beat:
-    <<: *app
-    command: uv run celery -A fetcher.app beat -s /tmp/celerybeat-schedule --loglevel=info
 
   # MCP 服务（dotnet-mcp 工程）：透传 REST + TA-Lib 指标分析，:8000 Streamable HTTP
   mcp:
