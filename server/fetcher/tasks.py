@@ -1,23 +1,23 @@
 """
-fetcher 任务定义（设计文档 4.2 节）。
+fetcher 任务定义。
 
 统一骨架：标记 fetch_task.running → provider 查询 → writer 落库（与水位更新同事务）
-→ 标记 succeeded/failed。
+→ 标记 succeeded/failed。worker（solo pool）串行消费队列中的任务。
 
 约定：
 - NoDataFoundError 对范围/列表类查询是合法的 0 行结果：**定型区**照常更新水位
   （声明"该范围已检查过，没有数据"），防止读穿透反复触发抓取；**未定型尾部**
   只声明实际返回的数据（db/coverage.claimable_last），数据源尚未发布的日期
   留待后续重抓，避免形成永久空洞。
-- DataSourceError 自动重试（退避，最多 2 次）；重试耗尽才标记 failed。
+- DataSourceError 在 _run 内自动重试（退避，最多 2 次）；重试耗尽才标记 failed。
 - 所有日期参数为 'YYYY-MM-DD' 字符串（货币供应量为 'YYYY-MM' / 'YYYY'）。
 - 快照类任务（股票列表/成分股/行业）的 snap_date 由调用方解析为具体交易日。
 """
 
 import logging
+import time
 from datetime import date, datetime, timezone
 
-from billiard.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import update as sa_update
 
 from core.timeutil import today_cst as _today
@@ -30,6 +30,9 @@ from fetcher.providers import baostock as provider
 from fetcher.providers.interface import DataSourceError, NoDataFoundError
 
 logger = logging.getLogger(__name__)
+
+_MAX_RETRIES = 2
+_RETRY_BACKOFF = 5
 
 
 def _d(s: str) -> date:
@@ -70,40 +73,39 @@ def _mark(fetch_task_id: int | None, **fields) -> None:
         logger.exception("更新 fetch_task #%s 状态失败", fetch_task_id)
 
 
-_TASK_OPTS = dict(
-    bind=True,
-    # SoftTimeLimitExceeded 也任务级重试：进程内剩余预算不足时 provider 直接
-    # 放行该异常，重新投递的执行有全新时限
-    autoretry_for=(DataSourceError, SoftTimeLimitExceeded),
-    dont_autoretry_for=(NoDataFoundError,),
-    retry_backoff=5,
-    retry_backoff_max=60,
-    max_retries=2,
-)
-
-
 def _run(task, fetch_task_id: int | None, impl) -> dict:
-    """任务统一骨架：状态标记 + 重试耗尽才 failed。"""
+    """任务统一骨架：状态标记 + DataSourceError 退避重试 + 重试耗尽才 failed。"""
     _mark(
         fetch_task_id,
         status=TaskStatus.RUNNING,
         started_at=_now(),
         celery_task_id=task.request.id,
     )
-    try:
-        result = impl()
-    except Exception as e:
-        if task.request.retries >= task.max_retries:  # 重试耗尽
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            result = impl()
+        except NoDataFoundError:
+            raise
+        except DataSourceError as e:
+            if attempt < _MAX_RETRIES:
+                wait = _RETRY_BACKOFF * (2 ** attempt)
+                logger.warning("任务失败(第%d次)，%ds 后重试: %s", attempt + 1, wait, e)
+                time.sleep(wait)
+                continue
             _mark(fetch_task_id, status=TaskStatus.FAILED, error=str(e), finished_at=_now())
-        raise
-    _mark(fetch_task_id, status=TaskStatus.SUCCEEDED, finished_at=_now())
-    return result
+            raise
+        except Exception as e:
+            _mark(fetch_task_id, status=TaskStatus.FAILED, error=str(e), finished_at=_now())
+            raise
+        _mark(fetch_task_id, status=TaskStatus.SUCCEEDED, finished_at=_now())
+        return result
+    raise RuntimeError("unreachable")
 
 
 # ── K 线 ──
 
 
-@app.task(name="fetcher.fetch_kline", **_TASK_OPTS)
+@app.task(name="fetcher.fetch_kline", bind=True)
 def fetch_kline(self, code: str, start_date: str, end_date: str,
                 frequency: str = "d", fetch_task_id: int | None = None) -> dict:
     def impl() -> dict:
@@ -123,7 +125,7 @@ def fetch_kline(self, code: str, start_date: str, end_date: str,
     return _run(self, fetch_task_id, impl)
 
 
-@app.task(name="fetcher.fetch_kline_minute", **_TASK_OPTS)
+@app.task(name="fetcher.fetch_kline_minute", bind=True)
 def fetch_kline_minute(self, code: str, start_date: str, end_date: str,
                        frequency: int = 30, fetch_task_id: int | None = None) -> dict:
     def impl() -> dict:
@@ -150,7 +152,7 @@ def fetch_kline_minute(self, code: str, start_date: str, end_date: str,
 # ── 除权因子 / 基本信息 / 分红 ──
 
 
-@app.task(name="fetcher.fetch_adjust_factor", **_TASK_OPTS)
+@app.task(name="fetcher.fetch_adjust_factor", bind=True)
 def fetch_adjust_factor(self, code: str, start_date: str, end_date: str,
                         fetch_task_id: int | None = None) -> dict:
     """复权因子**必须整段抓取**，传入 start_date 仅用于派发/去重，不参与查询。
@@ -182,7 +184,7 @@ def fetch_adjust_factor(self, code: str, start_date: str, end_date: str,
     return _run(self, fetch_task_id, impl)
 
 
-@app.task(name="fetcher.fetch_stock_basic", **_TASK_OPTS)
+@app.task(name="fetcher.fetch_stock_basic", bind=True)
 def fetch_stock_basic(self, code: str, fetch_task_id: int | None = None) -> dict:
     def impl() -> dict:
         df = provider.query_stock_basic(code)
@@ -194,7 +196,7 @@ def fetch_stock_basic(self, code: str, fetch_task_id: int | None = None) -> dict
     return _run(self, fetch_task_id, impl)
 
 
-@app.task(name="fetcher.fetch_dividend", **_TASK_OPTS)
+@app.task(name="fetcher.fetch_dividend", bind=True)
 def fetch_dividend(self, code: str, year: int, year_type: str = "report",
                    fetch_task_id: int | None = None) -> dict:
     def impl() -> dict:
@@ -214,7 +216,7 @@ def fetch_dividend(self, code: str, year: int, year_type: str = "report",
 # ── 财报 ──
 
 
-@app.task(name="fetcher.fetch_financial_report", **_TASK_OPTS)
+@app.task(name="fetcher.fetch_financial_report", bind=True)
 def fetch_financial_report(self, code: str, year: int, quarter: int,
                            fetch_task_id: int | None = None) -> dict:
     """单季度六类财务数据（盈利/营运/成长/偿债/现金流/杜邦）。"""
@@ -232,7 +234,7 @@ def fetch_financial_report(self, code: str, year: int, quarter: int,
     return _run(self, fetch_task_id, impl)
 
 
-@app.task(name="fetcher.fetch_performance_report", **_TASK_OPTS)
+@app.task(name="fetcher.fetch_performance_report", bind=True)
 def fetch_performance_report(self, code: str, start_date: str, end_date: str,
                              fetch_task_id: int | None = None) -> dict:
     """业绩快报 + 业绩预告（同一日期范围一次抓取）。"""
@@ -265,7 +267,7 @@ def fetch_performance_report(self, code: str, start_date: str, end_date: str,
 # ── 市场概览 ──
 
 
-@app.task(name="fetcher.fetch_trade_calendar", **_TASK_OPTS)
+@app.task(name="fetcher.fetch_trade_calendar", bind=True)
 def fetch_trade_calendar(self, start_date: str, end_date: str,
                          fetch_task_id: int | None = None) -> dict:
     def impl() -> dict:
@@ -282,7 +284,7 @@ def fetch_trade_calendar(self, start_date: str, end_date: str,
     return _run(self, fetch_task_id, impl)
 
 
-@app.task(name="fetcher.fetch_stock_list", **_TASK_OPTS)
+@app.task(name="fetcher.fetch_stock_list", bind=True)
 def fetch_stock_list(self, snap_date: str, fetch_task_id: int | None = None) -> dict:
     def impl() -> dict:
         df = _query_or_none(provider.query_all_stock, snap_date)
@@ -297,7 +299,7 @@ def fetch_stock_list(self, snap_date: str, fetch_task_id: int | None = None) -> 
     return _run(self, fetch_task_id, impl)
 
 
-@app.task(name="fetcher.fetch_index_constituent", **_TASK_OPTS)
+@app.task(name="fetcher.fetch_index_constituent", bind=True)
 def fetch_index_constituent(self, index_code: str, snap_date: str,
                             fetch_task_id: int | None = None) -> dict:
     def impl() -> dict:
@@ -310,7 +312,7 @@ def fetch_index_constituent(self, index_code: str, snap_date: str,
     return _run(self, fetch_task_id, impl)
 
 
-@app.task(name="fetcher.fetch_industry", **_TASK_OPTS)
+@app.task(name="fetcher.fetch_industry", bind=True)
 def fetch_industry(self, snap_date: str, fetch_task_id: int | None = None) -> dict:
     def impl() -> dict:
         df = provider.query_industry(snap_date)
@@ -337,27 +339,7 @@ def _macro_dates(kind: str, start_date: str, end_date: str) -> tuple[date, date]
     return _d(start_date), _d(end_date)
 
 
-# ── 联调/部署验证 ──
-
-
-@app.task(name="fetcher.debug_probe", bind=True)
-def debug_probe(self, sleep_seconds: int = 0, code: str = "") -> dict:
-    """部署验证探针：sleep_seconds>0 时模拟挂死（无视软超时，逼出 SIGKILL 路径）；
-    返回子进程 PID 用于观察 max_tasks_per_child 回收与分片亲和（code 参与路由）。
-    不触碰 baostock 与数据库。"""
-    import os
-    import time
-
-    from billiard.exceptions import SoftTimeLimitExceeded
-
-    try:
-        time.sleep(sleep_seconds)
-    except SoftTimeLimitExceeded:
-        time.sleep(sleep_seconds)
-    return {"pid": os.getpid(), "code": code}
-
-
-@app.task(name="fetcher.fetch_macro", **_TASK_OPTS)
+@app.task(name="fetcher.fetch_macro", bind=True)
 def fetch_macro(self, kind: str, start_date: str, end_date: str,
                 fetch_task_id: int | None = None) -> dict:
     def impl() -> dict:

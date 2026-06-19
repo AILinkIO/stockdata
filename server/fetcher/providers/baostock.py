@@ -1,24 +1,25 @@
 """
-Baostock 查询函数（自 src/providers/baostock.py 迁入）。
+Baostock 查询函数。
 
-与旧实现的关键差异：**没有线程与队列**。本模块只在 Celery prefork 子进程内使用，
-进程即隔离边界——每个子进程在 worker_process_init 时登录，持有独立的 baostock
-全局 TCP 连接；挂死由父进程的 task_time_limit SIGKILL 兜底（见设计文档 4.1）。
+模块级单例连接，惰性登录（首次查询时 ensure_login）。所有 baostock 操作
+（login / query / relogin）通过 _BS_LOCK 串行化——baostock 全局 TCP 连接
+非线程安全，FastAPI 线程池的并发请求必须排队。
 
-可重试错误（连接断开/未登录）在进程内重登录一次重试；仍失败则抛出，
-交由 Celery 任务级重试或最终失败。
+挂死由 socket 超时（setdefaulttimeout）快速失败 + 重连重试兜底。
+可重试错误（连接断开/未登录）重登录后重试一次；仍失败则抛出 DataSourceError，
+交由任务层（_run）退避重试或最终失败。
 """
 
 import logging
 import os
 import socket
 import sys
+import threading
 import time
 from contextlib import contextmanager
 
 import baostock as bs
 import pandas as pd
-from billiard.exceptions import SoftTimeLimitExceeded
 
 from settings import settings
 
@@ -37,9 +38,10 @@ _RETRYABLE_CODES = frozenset(
     }
 )
 
-_logged_in = False  # 子进程内的登录状态
-_last_query_at = 0.0  # 上次成功查询时刻（monotonic）
-_IDLE_RELOGIN_SECONDS = 60  # baostock 服务端会掐闲置连接；闲置超过此值预防性重登录
+_logged_in = False
+_last_query_at = 0.0
+_IDLE_RELOGIN_SECONDS = 60
+_BS_LOCK = threading.RLock()
 
 
 def _is_retryable_error(exc: Exception) -> bool:
@@ -56,11 +58,7 @@ def _is_retryable_error(exc: Exception) -> bool:
 
 @contextmanager
 def _suppress_stdout():
-    """屏蔽 baostock login/logout 直接 print 到 stdout 的噪音。
-
-    Celery 子进程中 sys.stdout 是 LoggingProxy（无 fileno），此时退化为
-    redirect_stdout；普通进程中沿用 fd 级屏蔽。
-    """
+    """屏蔽 baostock login/logout 直接 print 到 stdout 的噪音。"""
     try:
         original_fd = sys.stdout.fileno()
     except (AttributeError, OSError, ValueError):
@@ -83,11 +81,11 @@ def _suppress_stdout():
 
 
 def ensure_login() -> None:
-    """确保当前进程已登录。失败抛 LoginError（任务层会重试/标记失败）。
+    """确保已登录。失败抛 LoginError（任务层会重试/标记失败）。
 
     登录用 socket 默认超时包住：baostock 的全局 TCP 连接在 login 时创建，
     创建时继承该超时，之后所有查询的 recv 都受其约束——挂死在超时处快速
-    失败走重连重试，而不是干等 task_time_limit 的 SIGKILL。
+    失败走重连重试。
     """
     global _logged_in
     if _logged_in:
@@ -154,41 +152,38 @@ def _collect_rows(rs, description: str) -> pd.DataFrame:
 def _query(bs_func, description: str, **kwargs) -> pd.DataFrame:
     """调用 API → 校验 → 收集数据；可重试错误重登录后重试一次。
 
-    连接闲置超过 _IDLE_RELOGIN_SECONDS 时预防性重登录：baostock 服务端会
-    静默断开闲置连接，复用死连接会阻塞在 recv 直到被超时机制击杀（实测）。
+    _BS_LOCK 串行化所有 baostock 操作（非线程安全）。
+    连接闲置超过 _IDLE_RELOGIN_SECONDS 时预防性重登录。
     """
     global _last_query_at
-    ensure_login()
-    if _last_query_at and time.monotonic() - _last_query_at > _IDLE_RELOGIN_SECONDS:
-        logger.info("连接闲置超过 %ds，预防性重新登录", _IDLE_RELOGIN_SECONDS)
-        force_relogin()
-    logger.info("正在查询 %s", description)
+    with _BS_LOCK:
+        ensure_login()
+        if _last_query_at and time.monotonic() - _last_query_at > _IDLE_RELOGIN_SECONDS:
+            logger.info("连接闲置超过 %ds，预防性重新登录", _IDLE_RELOGIN_SECONDS)
+            force_relogin()
+        logger.info("正在查询 %s", description)
 
-    def _do() -> pd.DataFrame:
-        rs = bs_func(**kwargs)
-        _check_api_error(rs, description)
-        df = _collect_rows(rs, description)
-        return df
+        def _do() -> pd.DataFrame:
+            rs = bs_func(**kwargs)
+            _check_api_error(rs, description)
+            df = _collect_rows(rs, description)
+            return df
 
-    try:
-        result = _do()
-    except SoftTimeLimitExceeded:
-        # 剩余时间预算不足，进程内重试注定被硬杀；
-        # 放行给 Celery 任务级重试（新执行有全新时限）
-        raise
-    except NoDataFoundError:
-        _last_query_at = time.monotonic()  # 空结果也是有效会话往返
-        raise
-    except Exception as e:
-        if not _is_retryable_error(e):
-            if isinstance(e, DataSourceError):
-                raise
-            raise DataSourceError(f"{description}: 未预期错误 - {e}") from e
-        logger.warning("%s: 可重试错误，重新登录后重试一次: %s", description, e)
-        force_relogin()
-        result = _do()
-    _last_query_at = time.monotonic()
-    return result
+        try:
+            result = _do()
+        except NoDataFoundError:
+            _last_query_at = time.monotonic()
+            raise
+        except Exception as e:
+            if not _is_retryable_error(e):
+                if isinstance(e, DataSourceError):
+                    raise
+                raise DataSourceError(f"{description}: 未预期错误 - {e}") from e
+            logger.warning("%s: 可重试错误，重新登录后重试一次: %s", description, e)
+            force_relogin()
+            result = _do()
+        _last_query_at = time.monotonic()
+        return result
 
 
 # ── K 线默认字段（按频率区分，与旧实现一致） ──
@@ -266,7 +261,6 @@ FINA_CATEGORIES = [
 
 def query_fina_quarter(code: str, year: str, quarter: int) -> dict[str, dict]:
     """单季度六类财务数据。返回 {report_type: {field: value}}，无数据的类别缺席。"""
-    ensure_login()
     result: dict[str, dict] = {}
     for bs_func, report_type in FINA_CATEGORIES:
         desc = f"{report_type} {code} {year}Q{quarter}"
