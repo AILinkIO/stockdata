@@ -59,7 +59,7 @@ def _range_task(data_type: str, code: str, fs: date, fe: date) -> tuple[str, dic
     raise ValueError(f"未知范围数据集: {data_type}")
 
 
-# 超大缺口切片上限（天/任务）：单任务时长有界（慢网络下也远低于 task_time_limit），
+# 超大缺口切片上限（天/任务）：单任务时长有界，
 # 且每段落库即推进水位——中途失败后重试只补剩余段，全史回填具备断点续传。
 # 未列出的数据集（日历/宏观等）行数小，不切。
 # adjust_factor 不切片：fetch_adjust_factor 恒整段抓取（fore 序列随新除权全量重算），
