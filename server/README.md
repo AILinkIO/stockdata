@@ -1,7 +1,7 @@
 # stockdata
 
 中国 A 股市场数据服务。数据源为 [Baostock](http://baostock.com/)，
-PostgreSQL 做数据仓库，Celery（Redis broker）+ 多进程任务体系负责抓取，
+PostgreSQL 做数据仓库，Celery（单 worker，solo pool 串行执行）负责抓取任务的队列调度，
 FastAPI 对外提供 REST 接口。
 
 文档：[API 参考](docs/api.md) · [数据生命周期（读穿透/缺口补抓/复权）](docs/data-lifecycle.md) · [架构设计](docs/refactor-design.md)
@@ -16,22 +16,27 @@ FastAPI 对外提供 REST 接口。
 - **日期工具** — 最新交易日、交易日判断、前后交易日
 - **分析报告** — 个股基本面 / 技术面 / 综合分析（Markdown）
 
-数据按需抓取（读穿透：缺数据时自动投递抓取任务并等待），辅以每日定时同步：
+数据按需抓取（读穿透：缺数据时同步抓取并等待），辅以每日定时同步：
 交易日历、股票列表、指数成分股、行业分类，以及**已入库代码的交易信息增量同步**
 （每交易日收盘后遍历水位表，对所有跟踪中的标的补抓 K 线/复权因子到当日）。
 
 ## 架构
 
 ```
-HTTP ──▶ api/（FastAPI）──读──▶ PostgreSQL ◀──写── fetcher/（Celery worker）
-              │ 缺数据时投递任务          ▲                 │ fork 子进程执行
-              └─────▶ Redis 队列 ────────┴─────────────────┘ 超时 SIGKILL 兜底
-                        ▲
-              beat（定时同步调度）
+HTTP ──▶ api/（FastAPI）──读──▶ PostgreSQL ◀──写── fetcher/（Celery worker，solo pool 串行）
+               │ 缺数据时投递任务到队列                    │ baostock 单线程安全（进程内串行 + socket 超时兜底）
+               └─────▶ Redis 队列 ──────────────────────┘
+                         ▲
+               beat（定时同步调度，独立进程）
 ```
 
-- baostock 全局 TCP 连接的挂死问题由**进程隔离**解决：每个查询在 Celery prefork
-  子进程内执行，子进程处理 N 个任务后回收，挂死时被 `task_time_limit` SIGKILL。
+- **单 worker，solo pool**：`--pool=solo --concurrency=1`，进程内串行执行任务。
+  baostock 只允许单进程单线程访问，solo pool 天然满足此约束——无需分片、无需 SIGKILL。
+- API 读穿透：缺数据时 `send_task()` 投递到 Redis 队列，`AsyncResult.get()` 阻塞等待结果；
+  同参数的 pending/running 任务由部分唯一索引去重，撞重复时轮询等待已有任务完成。
+- 批量回填：`POST /api/v1/tasks/backfill` 返回 202 + task_id，客户端轮询 `GET /api/v1/tasks/{id}`。
+- baostock 全局 TCP 连接的挂死由 **socket 超时**（`setdefaulttimeout`）解决：
+  查询 recv 在超时处快速失败，重登录后重试，不依赖进程隔离或 SIGKILL。
 - 只存原始事实（不复权 K 线 + 复权因子序列），复权价读取时计算，除权事件零失效。
 - 新鲜度规则（历史数据永久、盘中 5 分钟、财报披露期等）见 `db/coverage.py`。
 
@@ -53,25 +58,22 @@ uv sync
 uv run alembic upgrade head
 
 # 启动方式一：Docker Compose（推荐；compose.yaml 在仓库根目录，含 mcp 服务）
-# PG/Valkey 用物理机服务，api/fetcher×3分片/beat 在容器（host 网络直连 127.0.0.1）；
+# PG/Valkey 用物理机服务，api/worker/beat 在容器（host 网络直连 127.0.0.1）；
 # migrate 服务先跑 alembic upgrade head，成功后其余服务才启动
 cd .. && ./up.sh          # 等价于 sudo docker compose up -d --build
 
 # 启动方式二：裸机进程（开发/调试）
-# 同 code 同任务类型恒定路由到同一分片（单进程），天然串行并复用连接
-uv run celery -A fetcher.app worker -Q shard0 -n shard0@%h -c 1 --loglevel=info
-uv run celery -A fetcher.app worker -Q shard1 -n shard1@%h -c 1 --loglevel=info
-uv run celery -A fetcher.app worker -Q shard2 -n shard2@%h -c 1 --loglevel=info
-uv run celery -A fetcher.app beat --loglevel=info     # 定时同步
 uv run uvicorn api.main:app --host 0.0.0.0 --port 8080  # API
-# 裸机常驻可用 systemd 单元（deploy/，fetcher 为模板单元 stockdata-fetcher@{0..2}）；
-# 两种方式二选一，不可同时运行（端口与队列消费会冲突）
+uv run celery -A fetcher.app worker --pool=solo --concurrency=1 --loglevel=info  # 抓取 worker（单实例）
+uv run celery -A fetcher.app beat --loglevel=info       # 定时同步（独立进程）
+# 裸机常驻可用 systemd 单元（deploy/）；
+# 两种方式二选一，不可同时运行（端口会冲突）
 ```
 
 接口文档：<http://localhost:8080/docs>
 
-数据获取与任务提交均通过 REST：数据端点自带读穿透（缺数据自动抓取），
-批量回填走 `POST /api/v1/tasks/backfill`（202 + task_id 轮询）。
+数据获取与任务提交均通过 REST：数据端点自带读穿透（缺数据自动投递抓取任务并等待），
+批量回填走 `POST /api/v1/tasks/backfill`（202 异步，轮询 `GET /api/v1/tasks/{id}` 查状态）。
 
 ```bash
 # 示例
@@ -89,24 +91,21 @@ api/                  # FastAPI 应用
 ├── routers/          # REST 路由（行情/财报/指数/市场/宏观/日期/工具/任务）
 ├── services/         # 读穿透编排、复权计算、财报合并、交易日工具
 └── errors.py         # 领域异常 → HTTP 状态码
-fetcher/              # Celery 任务体系
-├── app.py            # Celery 实例 + 子进程生命周期配置
+fetcher/              # Celery 任务体系（单 worker，solo pool 串行执行）
+├── app.py            # Celery 实例 + beat 调度表
 ├── tasks.py          # 抓取任务（查询 → 解析 → upsert → 水位更新）
 ├── beat.py           # 定时同步任务
-└── providers/        # Baostock 查询函数（子进程内执行）
+└── providers/        # Baostock 查询函数
 db/
 ├── models/           # SQLAlchemy 2.0 模型（17 张表）
 ├── coverage.py       # 覆盖度/新鲜度规则
 └── alembic/          # schema 迁移
 core/                 # 代码标准化等纯逻辑
-deploy/               # systemd 单元
-scripts/              # smoke_celery.py（部署验证）
+deploy/               # systemd 单元（api / worker / beat）
 ```
 
 ## 运维
 
-- **冒烟验证**：`uv run python scripts/smoke_celery.py`（验证 Celery 子进程
-  生命周期四项行为）；`fetcher.debug_probe` 任务可在线探测 worker。
 - **分钟线分区**：`kline_minute` 按年分区，已预建至 2027 + DEFAULT 兜底，
   每年在 Alembic 中追加下一年分区。
 - **任务观测**：`fetch_task` 表记录每次抓取的参数、状态与错误。
