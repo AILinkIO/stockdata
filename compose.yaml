@@ -1,6 +1,6 @@
 # stockdata 全栈混合部署（仓库根目录，一键拉起见 ./up.sh）：
 #   - PostgreSQL 与 Valkey(Redis) 使用物理机服务（127.0.0.1）
-#   - api / worker / beat（server/）+ mcp（dotnet-mcp/）在容器中
+#   - api（内嵌 Celery worker）/ beat（server/）+ mcp（dotnet-mcp/）在容器中
 # 容器走 host 网络直连本机服务，server/.env 中的 127.0.0.1 DSN 零改动。
 #
 #   ./up.sh                       # 等价于 sudo docker compose up -d --build
@@ -18,10 +18,6 @@ x-app: &app
     migrate:
       condition: service_completed_successfully
 
-x-fetcher: &fetcher
-  <<: *app
-  stop_grace_period: 120s   # Celery 优雅退出：等在执行的任务完成
-
 services:
   # 一次性：建/升级 schema 后退出，其余服务等它成功才启动
   migrate:
@@ -32,8 +28,10 @@ services:
     command: uv run alembic upgrade head
     restart: "no"
 
+  # API + 内嵌 Celery worker（daemon thread，solo pool 串行执行）
   api:
     <<: *app
+    stop_grace_period: 120s
     command: uv run uvicorn api.main:app --host 0.0.0.0 --port 8080
     healthcheck:
       test: ["CMD", "uv", "run", "python", "-c",
@@ -41,11 +39,6 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-
-  # 单 worker（solo pool，串行执行）：baostock 单线程约束
-  worker:
-    <<: *fetcher
-    command: uv run celery -A fetcher.app worker --pool=solo --concurrency=1 --loglevel=info
 
   # 定时调度器：全局仅此一个实例；状态文件放容器内 /tmp
   beat:
