@@ -15,6 +15,7 @@ namespace StockData.Mcp.Indicators;
 ///   RSI  → MCP 工具 get_rsi
 ///   OBV  → MCP 工具 get_obv
 ///   EMA  → MCP 工具 get_vegas_channel / get_dual_ma
+///   SMA  → MCP 工具 get_ma_alignment
 ///   CCI  → 内部使用（不暴露 MCP），供后续指标服务层按需调用
 /// </summary>
 public static class TalibComputer
@@ -33,6 +34,17 @@ public static class TalibComputer
     {
         var out1 = new double[close.Length];
         var rc = Functions.Ema(close.AsSpan(), .., out1.AsSpan(), out var outRange, period);
+        return Align(out1, outRange, close.Length, rc);
+    }
+
+    // ── SMA ──────────────────────────────────────────────────────────
+
+    public static int SmaLookback(int period) => Functions.SmaLookback(period);
+
+    public static double?[] Sma(double[] close, int period)
+    {
+        var out1 = new double[close.Length];
+        var rc = Functions.Sma(close.AsSpan(), .., out1.AsSpan(), out var outRange, period);
         return Align(out1, outRange, close.Length, rc);
     }
 
