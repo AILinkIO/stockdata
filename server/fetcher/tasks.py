@@ -61,13 +61,23 @@ def _now() -> datetime:
 
 
 def _mark(fetch_task_id: int | None, **fields) -> None:
-    """更新 fetch_task 追踪行（独立短事务，不与数据写入耦合）。"""
+    """推进 fetch_task 追踪行状态（独立短事务，不与数据写入耦合）。
+
+    仅当行仍处于 pending/running 时才写入：一旦该行已被他方判为终态（典型是等待方的
+    僵尸清理把它置 failed），就不再覆盖。避免两类回写：① 僵尸误杀后本任务收尾又把行
+    复活成 succeeded；② acks_late 重投递重复执行时，回写一个已经结束的行。
+    """
     if fetch_task_id is None:
         return
     try:
         with SyncSession.begin() as s:
             s.execute(
-                sa_update(FetchTask).where(FetchTask.id == fetch_task_id).values(**fields)
+                sa_update(FetchTask)
+                .where(
+                    FetchTask.id == fetch_task_id,
+                    FetchTask.status.in_([TaskStatus.PENDING, TaskStatus.RUNNING]),
+                )
+                .values(**fields)
             )
     except Exception:
         logger.exception("更新 fetch_task #%s 状态失败", fetch_task_id)
@@ -84,7 +94,10 @@ def _run(task, fetch_task_id: int | None, impl) -> dict:
     for attempt in range(_MAX_RETRIES + 1):
         try:
             result = impl()
-        except NoDataFoundError:
+        except NoDataFoundError as e:
+            # 能传到这里的 NoDataFoundError = 未经 _query_or_none 折叠的查询返回 0 行
+            # （快照/基本信息类，0 行属异常）：标记 failed，让 DB 轮询的等待方读到并抛错。
+            _mark(fetch_task_id, status=TaskStatus.FAILED, error=str(e), finished_at=_now())
             raise
         except DataSourceError as e:
             if attempt < _MAX_RETRIES:

@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 app = Celery(
     "stockdata",
     broker=settings.broker_url,
+    # 等待路径已改为轮询 fetch_task 状态行，不再消费 AsyncResult；
+    # result backend 仅保留供调试/`celery inspect` 查看任务返回值，对等待是冗余的。
     backend=settings.result_backend,
     include=["fetcher.tasks", "fetcher.beat"],
 )
@@ -28,7 +30,7 @@ app.conf.update(
     task_acks_late=True,
     worker_prefetch_multiplier=1,
     broker_transport_options={"visibility_timeout": settings.visibility_timeout},
-    result_expires=600,
+    result_expires=600,  # 无人消费，仅靠过期自动回收，避免 result backend 堆积
     task_serializer="json",
     result_serializer="json",
     accept_content=["json"],

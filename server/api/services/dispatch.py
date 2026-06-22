@@ -1,9 +1,13 @@
 """
 任务投递与等待。
 
-submit() 经 Celery send_task() 异步投递到 Redis 队列，dispatch_and_wait() 用
-AsyncResult.get() 阻塞等待结果。去重依赖 fetch_task 的部分唯一索引：同参数的
-pending/running 任务只允许一个，撞到重复时轮询等待已有任务完成。
+submit() 经 Celery send_task() 异步投递到 Redis 队列；dispatch_and_wait() 通过轮询
+fetch_task 状态行等待完成（不依赖 Celery result backend）。去重依赖 fetch_task 的部分
+唯一索引：同参数的 pending/running 任务只允许一个，撞到重复时等待已有任务完成。
+
+为何不用 AsyncResult.get()：嵌入式 worker 与 API 同进程，worker 启动会把 Celery 的
+进程级全局 _task_join_will_block 置 True，令请求线程的 .get() 误判为"任务内调用"而
+抛错；且 fetch_task 状态表已是权威的完成/失败信号，result backend 对等待属冗余。
 """
 
 import hashlib
@@ -12,7 +16,6 @@ import logging
 import time
 from datetime import datetime, timedelta, timezone
 
-from celery.exceptions import TimeoutError as CeleryTimeoutError
 from sqlalchemy import select, text
 from sqlalchemy import update as sa_update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -26,7 +29,12 @@ from settings import settings
 logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL = 0.5
-_STALE_RUNNING = timedelta(seconds=600)
+# 僵尸判定阈值：必须 > broker 重投窗口(visibility_timeout=600s) > 最坏单任务时长
+# （单次 baostock 调用 + 最多 2 次退避重试，约 100~120s）。否则会误杀仍在健康执行的
+# 长任务——把 running 行翻成 failed、释放 params_hash 唯一索引，引发重复抓取与假 502。
+# 留足余量后，等待方只在「撞去重、加入一个早已运行很久的任务」时才可能触发它
+# （owner 的 started_at≈now，在 fetch_wait_timeout 窗口内根本够不到）。
+_STALE_RUNNING = timedelta(seconds=1200)
 
 
 def _params_hash(task_name: str, params: dict) -> str:
@@ -64,21 +72,17 @@ def submit(task_name: str, params: dict) -> tuple[int | None, str | None]:
 
 
 def dispatch_and_wait(task_name: str, params: dict, timeout: float | None = None) -> None:
-    """投递并等待完成；重复任务则等待已有任务。超时抛 FetchTimeoutError。"""
+    """投递并等待完成；重复任务则等待已有任务。超时抛 FetchTimeoutError，
+    任务失败抛 FetchFailedError。"""
     timeout = timeout if timeout is not None else settings.fetch_wait_timeout
-    row_id, celery_id = submit(task_name, params)
+    row_id, _celery_id = submit(task_name, params)
 
     if row_id is None:
-        _wait_existing(_params_hash(task_name, params), timeout, task_name)
-        return
-
-    try:
-        celery_app.AsyncResult(celery_id).get(timeout=timeout, propagate=True)
-    except CeleryTimeoutError as e:
-        raise FetchTimeoutError(f"{task_name} {params}") from e
-    except Exception as e:
-        _mark_failed(row_id, str(e))
-        raise FetchFailedError(f"{task_name} {params}: {e}") from e
+        # 撞到去重：等待已有同参数任务（取该 hash 最新一行）
+        row_id = _existing_row_id(_params_hash(task_name, params))
+        if row_id is None:
+            return  # 已有任务在投递与查询之间结束，视为完成
+    _wait_done(row_id, timeout, task_name)
 
 
 def _mark_failed(row_id: int, error: str) -> None:
@@ -91,9 +95,21 @@ def _mark_failed(row_id: int, error: str) -> None:
         )
 
 
-def _wait_existing(params_hash: str, timeout: float, task_name: str) -> None:
-    """轮询等待同参数的已有任务离开 pending/running 状态。
+def _existing_row_id(params_hash: str) -> int | None:
+    """取同参数 hash 的最新 fetch_task 行 id（撞去重时已有在途任务即此行）。"""
+    with SyncSession() as s:
+        return s.execute(
+            select(FetchTask.id)
+            .where(FetchTask.params_hash == params_hash)
+            .order_by(FetchTask.id.desc())
+            .limit(1)
+        ).scalar()
 
+
+def _wait_done(row_id: int, timeout: float, task_name: str) -> None:
+    """轮询 fetch_task 状态直至离开 pending/running。
+
+    succeeded → 返回；failed → 抛 FetchFailedError（带任务写入的 error）。
     僵尸防护：running 行超过 _STALE_RUNNING 视为 worker 异常（崩溃/卡死），
     标记 failed 释放唯一索引，让客户端重试。
     """
@@ -101,23 +117,19 @@ def _wait_existing(params_hash: str, timeout: float, task_name: str) -> None:
     while time.monotonic() < deadline:
         with SyncSession() as s:
             row = s.execute(
-                select(FetchTask.id, FetchTask.status,
-                       FetchTask.started_at, FetchTask.created_at)
-                .where(FetchTask.params_hash == params_hash)
-                .order_by(FetchTask.id.desc())
-                .limit(1)
+                select(FetchTask.status, FetchTask.started_at, FetchTask.error)
+                .where(FetchTask.id == row_id)
             ).first()
-        if row is None or row.status not in (TaskStatus.PENDING, TaskStatus.RUNNING):
-            if row is not None and row.status == TaskStatus.FAILED:
-                raise FetchFailedError(f"{task_name}: 已有同参数任务执行失败")
+        if row is None or row.status == TaskStatus.SUCCEEDED:
             return
-        now = datetime.now(timezone.utc)
+        if row.status == TaskStatus.FAILED:
+            raise FetchFailedError(f"{task_name}: {row.error or '任务执行失败'}")
         if (
             row.status == TaskStatus.RUNNING
             and row.started_at is not None
-            and now - row.started_at > _STALE_RUNNING
+            and datetime.now(timezone.utc) - row.started_at > _STALE_RUNNING
         ):
-            _mark_failed(row.id, "僵尸任务：执行超时未完成，由等待方标记失败")
-            raise FetchFailedError(f"{task_name}: 已有同参数任务僵死，已清理，请重试")
+            _mark_failed(row_id, "僵尸任务：执行超时未完成，由等待方标记失败")
+            raise FetchFailedError(f"{task_name}: 任务僵死，已清理，请重试")
         time.sleep(_POLL_INTERVAL)
-    raise FetchTimeoutError(f"{task_name}: 等待已有任务超时")
+    raise FetchTimeoutError(f"{task_name}: 等待任务超时")
