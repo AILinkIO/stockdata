@@ -8,7 +8,7 @@ using StockData.Mcp.StockDataClient;
 
 namespace StockData.Mcp.Tools;
 
-/// <summary>RSI 与 OBV 指标工具（TALib 本地计算，K线取自后端前复权日线）。</summary>
+/// <summary>RSI 与 OBV 指标工具（TALib 本地计算，K线取自后端日/周/月线）。</summary>
 [McpServerToolType]
 public static class RsiObvTools
 {
@@ -23,7 +23,7 @@ public static class RsiObvTools
     // ── RSI ──────────────────────────────────────────────────────────
 
     [McpServerTool(Name = "get_rsi")]
-    [Description("计算股票 RSI（相对强弱指数）。output=series 返回逐日序列，latest 只返回最新值及超买超卖判断。adjust_flag: 2前复权(默认)/1后复权/3不复权。")]
+    [Description("计算股票 RSI（相对强弱指数）。output=series 返回逐日序列，latest 只返回最新值及超买超卖判断。adjust_flag: 2前复权(默认)/1后复权/3不复权。frequency: d日(默认)/w周/m月（在对应周期K线上计算）。")]
     public static async Task<string> GetRsi(
         StockDataApiClient api,
         IMemoryCache cache,
@@ -32,6 +32,7 @@ public static class RsiObvTools
         [Description("结束日期 YYYY-MM-DD")] string end_date,
         [Description("RSI 周期，默认 14")] int period = 14,
         [Description("复权：2前复权/1后复权/3不复权")] string adjust_flag = "2",
+        [Description("K线周期：d日(默认)/w周/m月")] string frequency = "d",
         [Description("series 逐日序列 / latest 最新值")] string output = "series",
         [Description("series 模式最大返回行数")] int limit = 120,
         CancellationToken ct = default)
@@ -40,7 +41,7 @@ public static class RsiObvTools
 
         var lookback = TalibComputer.RsiLookback(period);
         var (k, err) = await KlineLoader.LoadAsync(api, cache, code,
-            start_date, end_date, lookback, adjust_flag, ct);
+            start_date, end_date, lookback, adjust_flag, frequency, ct);
         if (k is null) return err!;
 
         var rsi = TalibComputer.Rsi(k.Close, period);
@@ -65,14 +66,14 @@ public static class RsiObvTools
 
         var total = rows.Count;
         if (total > limit) rows = rows.TakeLast(limit).ToList();
-        var body = JsonSerializer.Serialize(new { code, period, adjust_flag, rows }, JsonOpts);
+        var body = JsonSerializer.Serialize(new { code, period, adjust_flag, frequency, rows }, JsonOpts);
         return total > limit ? $"{body}\n（共 {total} 行，已截断为最近 {limit} 行）" : body;
     }
 
     // ── OBV ──────────────────────────────────────────────────────────
 
     [McpServerTool(Name = "get_obv")]
-    [Description("计算股票 OBV（能量潮）。OBV 累积量价方向，上涨日加量、下跌日减量，衡量资金流向趋势与价格背离。adjust_flag: 2前复权(默认)/1后复权/3不复权。")]
+    [Description("计算股票 OBV（能量潮）。OBV 累积量价方向，上涨日加量、下跌日减量，衡量资金流向趋势与价格背离。adjust_flag: 2前复权(默认)/1后复权/3不复权。frequency: d日(默认)/w周/m月（在对应周期K线上计算）。")]
     public static async Task<string> GetObv(
         StockDataApiClient api,
         IMemoryCache cache,
@@ -80,13 +81,14 @@ public static class RsiObvTools
         [Description("起始日期 YYYY-MM-DD")] string start_date,
         [Description("结束日期 YYYY-MM-DD")] string end_date,
         [Description("复权：2前复权/1后复权/3不复权")] string adjust_flag = "2",
+        [Description("K线周期：d日(默认)/w周/m月")] string frequency = "d",
         [Description("series 逐日序列 / latest 最新值")] string output = "series",
         [Description("series 模式最大返回行数")] int limit = 120,
         CancellationToken ct = default)
     {
         // OBV 无需预热 bar（lookback=0），但为确保起始基准一致，向前多取 5 根
         var (k, err) = await KlineLoader.LoadAsync(api, cache, code,
-            start_date, end_date, 5, adjust_flag, ct);
+            start_date, end_date, 5, adjust_flag, frequency, ct);
         if (k is null) return err!;
 
         var obv = TalibComputer.Obv(k.Close, k.Volume);
@@ -113,7 +115,7 @@ public static class RsiObvTools
 
         var total = rows.Count;
         if (total > limit) rows = rows.TakeLast(limit).ToList();
-        var body = JsonSerializer.Serialize(new { code, adjust_flag, rows }, JsonOpts);
+        var body = JsonSerializer.Serialize(new { code, adjust_flag, frequency, rows }, JsonOpts);
         return total > limit ? $"{body}\n（共 {total} 行，已截断为最近 {limit} 行）" : body;
     }
 
@@ -126,7 +128,7 @@ public static class RsiObvTools
     [McpServerTool(Name = "get_cci")]
     [Description("双周期 CCI 动量系统（CCI55 快线 + CCI144 慢线 + DIFF 差值柱）。" +
                  "zone 字段：强势多头/强势空头（CCI144 突破±100）、短期超买/短期超卖（CCI55 突破±100 而 CCI144 未确认）、中性。" +
-                 "output=series 返回逐日序列，latest 只返回最新值。adjust_flag: 2前复权(默认)/1后复权/3不复权。")]
+                 "output=series 返回逐日序列，latest 只返回最新值。adjust_flag: 2前复权(默认)/1后复权/3不复权。frequency: d日(默认)/w周/m月（在对应周期K线上计算）。")]
     public static async Task<string> GetCci(
         StockDataApiClient api,
         IMemoryCache cache,
@@ -134,13 +136,14 @@ public static class RsiObvTools
         [Description("起始日期 YYYY-MM-DD")] string start_date,
         [Description("结束日期 YYYY-MM-DD")] string end_date,
         [Description("复权：2前复权/1后复权/3不复权")] string adjust_flag = "2",
+        [Description("K线周期：d日(默认)/w周/m月")] string frequency = "d",
         [Description("series 逐日序列 / latest 最新值")] string output = "series",
         [Description("series 模式最大返回行数")] int limit = 120,
         CancellationToken ct = default)
     {
         var lookback = TalibComputer.CciLookback(CciSlow); // 慢线决定所需预热 bar 数
         var (k, err) = await KlineLoader.LoadAsync(api, cache, code,
-            start_date, end_date, lookback, adjust_flag, ct);
+            start_date, end_date, lookback, adjust_flag, frequency, ct);
         if (k is null) return err!;
 
         var fast = TalibComputer.Cci(k.High, k.Low, k.Close, CciFast);
@@ -174,7 +177,7 @@ public static class RsiObvTools
 
         var total = rows.Count;
         if (total > limit) rows = rows.TakeLast(limit).ToList();
-        var body = JsonSerializer.Serialize(new { code, adjust_flag, fast_period = CciFast, slow_period = CciSlow, rows }, JsonOpts);
+        var body = JsonSerializer.Serialize(new { code, adjust_flag, fast_period = CciFast, slow_period = CciSlow, frequency, rows }, JsonOpts);
         return total > limit ? $"{body}\n（共 {total} 行，已截断为最近 {limit} 行）" : body;
     }
 

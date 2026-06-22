@@ -39,7 +39,8 @@ public static class DualMaTools
         "输出 fast/slow（两条均线）、spread（快−慢，趋势强度）、" +
         "cross（金叉/死叉，仅交叉当日标注）、trend（多头排列/空头排列）。" +
         "output=series 返回逐日序列，latest 返回最新值。" +
-        "adjust_flag: 2前复权(默认)/1后复权/3不复权。")]
+        "adjust_flag: 2前复权(默认)/1后复权/3不复权。" +
+        "frequency: d日(默认)/w周/m月（在对应周期K线上计算）。")]
     public static async Task<string> GetDualMa(
         StockDataApiClient api,
         IMemoryCache cache,
@@ -49,6 +50,7 @@ public static class DualMaTools
         [Description("快线 EMA 周期，须小于慢线")] int fast_period = 20,
         [Description("慢线 EMA 周期")] int slow_period = 50,
         [Description("复权：2前复权/1后复权/3不复权")] string adjust_flag = "2",
+        [Description("K线周期：d日(默认)/w周/m月")] string frequency = "d",
         [Description("series 逐日序列 / latest 最新值")] string output = "series",
         [Description("series 模式最大返回行数")] int limit = 120,
         CancellationToken ct = default)
@@ -61,7 +63,7 @@ public static class DualMaTools
         // +1：交叉检测需要 start_date 前一根 K 线的有效均线值
         var lookback = TalibComputer.EmaLookback(slow_period) + 1;
         var (k, err) = await KlineLoader.LoadAsync(api, cache, code,
-            start_date, end_date, lookback, adjust_flag, ct);
+            start_date, end_date, lookback, adjust_flag, frequency, ct);
         if (k is null) return err!;
 
         var fast = TalibComputer.Ema(k.Close, fast_period);
@@ -104,7 +106,7 @@ public static class DualMaTools
         var total = rows.Count;
         if (total > limit) rows = rows.TakeLast(limit).ToList();
         var body = JsonSerializer.Serialize(
-            new { code, fast_period, slow_period, adjust_flag, rows }, JsonOpts);
+            new { code, fast_period, slow_period, adjust_flag, frequency, rows }, JsonOpts);
         return total > limit ? $"{body}\n（共 {total} 行，已截断为最近 {limit} 行）" : body;
     }
 

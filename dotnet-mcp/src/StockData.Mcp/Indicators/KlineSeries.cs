@@ -45,24 +45,35 @@ public sealed class KlineSeries
 /// </summary>
 public static class KlineLoader
 {
-    // 1 个交易日 ≈ 1.5 个自然日，多乘 0.1 作为容错
-    private const double CalendarFactor = 1.6;
+    // 把"预热 bar 数"换算成需向前扩展的自然日数：每根 K 线约跨多少自然日（含容错余量）。
+    // 日线 1 交易日≈1.5 自然日；周线≈1 周；月线≈1 月。周/月线若仍按日线系数换算，预热区间
+    // 会严重不足，导致起始段均线全为 null。
+    private static double CalendarDaysPerBar(string frequency) => frequency switch
+    {
+        "w" => 8.0,
+        "m" => 33.0,
+        _   => 1.6,   // "d"
+    };
 
     public static async Task<(KlineSeries? Series, string? Error)> LoadAsync(
         StockDataApiClient api, IMemoryCache cache,
         string code, string startDate, string endDate,
-        int extraBars, string adjustFlag, CancellationToken ct)
+        int extraBars, string adjustFlag, string frequency, CancellationToken ct)
     {
+        if (frequency is not ("d" or "w" or "m"))
+            return (null, $"Error: frequency 仅支持 d(日)/w(周)/m(月)，当前为 {frequency}");
+
         var extStart = DateTime.Parse(startDate)
-            .AddDays(-(int)(extraBars * CalendarFactor))
+            .AddDays(-(int)(extraBars * CalendarDaysPerBar(frequency)))
             .ToString("yyyy-MM-dd");
 
-        var key = $"kline:{code}:{extStart}:{endDate}:{adjustFlag}";
+        // frequency 必须进缓存键，否则日/周/月线会相互串味
+        var key = $"kline:{code}:{frequency}:{extStart}:{endDate}:{adjustFlag}";
         if (cache.TryGetValue(key, out KlineSeries? hit)) return (hit, null);
 
         var json = await api.GetAsync($"/api/v1/stocks/{code}/kline",
             new() { ["start_date"] = extStart, ["end_date"] = endDate,
-                    ["frequency"] = "d", ["adjust_flag"] = adjustFlag }, ct);
+                    ["frequency"] = frequency, ["adjust_flag"] = adjustFlag }, ct);
 
         if (json.StartsWith("Error:")) return (null, json);
 

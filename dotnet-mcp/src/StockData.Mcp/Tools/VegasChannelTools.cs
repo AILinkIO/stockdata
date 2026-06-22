@@ -38,7 +38,8 @@ public static class VegasChannelTools
         "Vegas 通道：EMA12/21（快速信号线）+ EMA144/169（通道1）+ EMA233（中轴）+ EMA576/676（通道2）。" +
         "zone 字段综合价格位置与快线方向：多头强势/多头/回调整理/通道1内/通道2内/弱势反弹/空头。" +
         "output=series 返回逐日序列，latest 返回最新值。" +
-        "注：EMA676 需约 3 年日线预热，首次请求耗时较长。adjust_flag: 2前复权(默认)/1后复权/3不复权。")]
+        "注：EMA676 需约 3 年日线预热，首次请求耗时较长。adjust_flag: 2前复权(默认)/1后复权/3不复权。" +
+        "frequency: d日(默认)/w周/m月（在对应周期K线上计算；周/月线 EMA676 所需历史极长，慎用）。")]
     public static async Task<string> GetVegasChannel(
         StockDataApiClient api,
         IMemoryCache cache,
@@ -46,6 +47,7 @@ public static class VegasChannelTools
         [Description("起始日期 YYYY-MM-DD")] string start_date,
         [Description("结束日期 YYYY-MM-DD")] string end_date,
         [Description("复权：2前复权/1后复权/3不复权")] string adjust_flag = "2",
+        [Description("K线周期：d日(默认)/w周/m月")] string frequency = "d",
         [Description("series 逐日序列 / latest 最新值")] string output = "series",
         [Description("series 模式最大返回行数")] int limit = 120,
         CancellationToken ct = default)
@@ -53,7 +55,7 @@ public static class VegasChannelTools
         // EMA676 决定最大预热量
         var lookback = TalibComputer.EmaLookback(676);
         var (k, err) = await KlineLoader.LoadAsync(api, cache, code,
-            start_date, end_date, lookback, adjust_flag, ct);
+            start_date, end_date, lookback, adjust_flag, frequency, ct);
         if (k is null) return err!;
 
         // 计算全部 7 条 EMA
@@ -110,7 +112,7 @@ public static class VegasChannelTools
 
         var total = rows.Count;
         if (total > limit) rows = rows.TakeLast(limit).ToList();
-        var body = JsonSerializer.Serialize(new { code, adjust_flag, rows }, JsonOpts);
+        var body = JsonSerializer.Serialize(new { code, adjust_flag, frequency, rows }, JsonOpts);
         return total > limit ? $"{body}\n（共 {total} 行，已截断为最近 {limit} 行）" : body;
     }
 

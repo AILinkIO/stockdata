@@ -43,7 +43,8 @@ public static class MaAlignmentTools
         "均线多头排列（MA Alignment）：对一组 SMA 周期（默认 5/10/20/60）判断每日排列状态，" +
         "输出每条 MA 值、alignment（多头排列/空头排列/未排列）、signal（多头形成/多头破坏/空头形成/空头破坏）。" +
         "output=series 返回逐日序列，latest 返回最新值。" +
-        "periods 须严格升序、至少 2 个、每个 >= 2；adjust_flag: 2前复权(默认)/1后复权/3不复权。")]
+        "periods 须严格升序、至少 2 个、每个 >= 2；adjust_flag: 2前复权(默认)/1后复权/3不复权。" +
+        "frequency: d日(默认)/w周/m月（在对应周期K线上计算）。")]
     public static async Task<string> GetMaAlignment(
         StockDataApiClient api,
         IMemoryCache cache,
@@ -52,6 +53,7 @@ public static class MaAlignmentTools
         [Description("结束日期 YYYY-MM-DD")] string end_date,
         [Description("SMA 周期数组，默认 [5,10,20,60]，须严格升序、>=2")] int[]? periods = null,
         [Description("复权：2前复权/1后复权/3不复权")] string adjust_flag = "2",
+        [Description("K线周期：d日(默认)/w周/m月")] string frequency = "d",
         [Description("series 逐日序列 / latest 最新值")] string output = "series",
         [Description("series 模式最大返回行数")] int limit = 120,
         CancellationToken ct = default)
@@ -71,7 +73,7 @@ public static class MaAlignmentTools
         // +1：signal 检测需要 start_date 前一根 K 线的有效 MA 值
         var lookback = TalibComputer.SmaLookback(periods[^1]) + 1;
         var (k, err) = await KlineLoader.LoadAsync(api, cache, code,
-            start_date, end_date, lookback, adjust_flag, ct);
+            start_date, end_date, lookback, adjust_flag, frequency, ct);
         if (k is null) return err!;
 
         // 计算所有周期的 SMA
@@ -122,7 +124,7 @@ public static class MaAlignmentTools
         var total = rows.Count;
         if (total > limit) rows = rows.TakeLast(limit).ToList();
         var body = JsonSerializer.Serialize(
-            new { code, periods, adjust_flag, rows }, JsonOpts);
+            new { code, periods, adjust_flag, frequency, rows }, JsonOpts);
         return total > limit ? $"{body}\n（共 {total} 行，已截断为最近 {limit} 行）" : body;
     }
 
