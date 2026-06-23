@@ -20,9 +20,6 @@ class Settings(BaseSettings):
     result_backend: str = "redis://127.0.0.1:6379/3"  # 仅供调试/inspect；等待走轮询 fetch_task
     visibility_timeout: int = 600      # Redis broker 重投递窗口
 
-    # ── baostock ──
-    baostock_socket_timeout: int = 30  # baostock TCP 超时：挂死靠它快速失败重连
-
     # ── API 读穿透 ──
     fetch_wait_timeout: int = 120      # 读穿透轮询等待抓取任务完成的超时（秒）
 

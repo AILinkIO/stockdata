@@ -100,18 +100,6 @@ wheels = [
 ]
 
 [[package]]
-name = "baostock"
-version = "0.9.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pandas" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/43/5e/471c14eebb204ed89de0fe11740d6f4513d44454fe5e35bc13b29ef3e510/baostock-0.9.1.tar.gz", hash = "sha256:5ec3a44cbec9471872b0a4ae02c39aea29db688bb740b769167393bc6e244a39", size = 25560, upload-time = "2026-04-14T09:55:28.382Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/c8/eb/fadb92e38fbb2fefa3d9d3c14d016cf3a5920e34666aeb9950bc5311c856/baostock-0.9.1-py3-none-any.whl", hash = "sha256:a30749f095fd58ecd7ba3799dad605d355ad8e6d19310bc437039e1e526f15fe", size = 47918, upload-time = "2026-04-14T09:55:27.129Z" },
-]
-
-[[package]]
 name = "beautifulsoup4"
 version = "4.15.0"
 source = { registry = "https://pypi.org/simple" }
@@ -958,7 +946,6 @@ source = { virtual = "." }
 dependencies = [
     { name = "akshare" },
     { name = "alembic" },
-    { name = "baostock" },
     { name = "celery", extra = ["redis"] },
     { name = "fastapi" },
     { name = "pandas" },
@@ -977,7 +964,6 @@ dev = [
 requires-dist = [
     { name = "akshare", specifier = ">=1.17.97" },
     { name = "alembic", specifier = ">=1.18.4" },
-    { name = "baostock", specifier = ">=0.9.1" },
     { name = "celery", extras = ["redis"], specifier = ">=5.6.3" },
     { name = "fastapi", specifier = ">=0.136.3" },
     { name = "pandas", specifier = ">=3.0.0" },

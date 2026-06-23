@@ -26,7 +26,7 @@ from db.models import DataType, FetchTask, TaskStatus
 from db.session import SyncSession
 from fetcher import writer
 from fetcher.app import app
-from fetcher.providers import baostock as provider
+from fetcher.providers import akshare as provider
 from fetcher.providers.interface import DataSourceError, NoDataFoundError
 
 logger = logging.getLogger(__name__)

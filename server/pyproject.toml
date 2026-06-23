@@ -7,7 +7,6 @@ requires-python = ">=3.14"
 dependencies = [
     "akshare>=1.17.97",
     "alembic>=1.18.4",
-    "baostock>=0.9.1",
     "celery[redis]>=5.6.3",
     "fastapi>=0.136.3",
     "pandas>=3.0.0",
