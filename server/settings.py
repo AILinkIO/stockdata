@@ -22,6 +22,7 @@ class Settings(BaseSettings):
 
     # ── baostock ──
     baostock_socket_timeout: int = 30  # baostock TCP 超时：挂死靠它快速失败重连
+    fetch_rate_limit_per_minute: int = 60  # 每分钟最多向数据源发起的查询次数（防 IP 拉黑），<=0 关闭
 
     # ── API 读穿透 ──
     fetch_wait_timeout: int = 120      # 读穿透轮询等待抓取任务完成的超时（秒）

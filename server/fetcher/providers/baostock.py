@@ -16,6 +16,7 @@ import socket
 import sys
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 
 import baostock as bs
@@ -42,6 +43,41 @@ _logged_in = False
 _last_query_at = 0.0
 _IDLE_RELOGIN_SECONDS = 60
 _BS_LOCK = threading.RLock()
+
+
+class _RateLimiter:
+    """滑动窗口限流：每 period 秒最多 max_calls 次。
+
+    acquire() 在额度耗尽时阻塞到最早一次调用滑出窗口为止——保证向数据源的查询
+    速率不超过配额（防 baostock 因高频被 IP 拉黑）。允许窗口内突发到 max_calls，
+    之后按窗口节流。自带锁，与 _BS_LOCK 解耦。
+    """
+
+    def __init__(self, max_calls: int, period: float = 60.0) -> None:
+        self.max_calls = max_calls
+        self.period = period
+        self._calls: deque[float] = deque()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        if self.max_calls <= 0:  # <=0 关闭限流
+            return
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                while self._calls and now - self._calls[0] >= self.period:
+                    self._calls.popleft()
+                if len(self._calls) < self.max_calls:
+                    self._calls.append(now)
+                    return
+                sleep_for = self.period - (now - self._calls[0])
+            if sleep_for > 0:
+                logger.info("抓取限流：达到 %d 次/%.0fs 配额，等待 %.2fs",
+                            self.max_calls, self.period, sleep_for)
+                time.sleep(sleep_for)
+
+
+_RATE_LIMITER = _RateLimiter(settings.fetch_rate_limit_per_minute)
 
 
 def _is_retryable_error(exc: Exception) -> bool:
@@ -154,8 +190,10 @@ def _query(bs_func, description: str, **kwargs) -> pd.DataFrame:
 
     _BS_LOCK 串行化所有 baostock 操作（非线程安全）。
     连接闲置超过 _IDLE_RELOGIN_SECONDS 时预防性重登录。
+    限流（_RATE_LIMITER）在取锁前阻塞，避免持锁睡眠。
     """
     global _last_query_at
+    _RATE_LIMITER.acquire()
     with _BS_LOCK:
         ensure_login()
         if _last_query_at and time.monotonic() - _last_query_at > _IDLE_RELOGIN_SECONDS:
