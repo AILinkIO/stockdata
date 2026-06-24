@@ -7,6 +7,9 @@ COPY src/ src/
 RUN dotnet publish src/StockData.Mcp -c Release -o /app --no-restore
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends wget \
+    && rm -rf /var/lib/apt/lists/*
 ENV TZ=Asia/Shanghai
 WORKDIR /app
 COPY --from=build /app .
