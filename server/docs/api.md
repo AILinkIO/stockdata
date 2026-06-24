@@ -3,6 +3,43 @@
 > 在线交互文档：服务运行后访问 <http://localhost:8080/docs>（OpenAPI 自动生成，参数定义以其为准）。
 > 本文档侧重接口清单、全局约定与行为语义。数据新鲜度与抓取行为见 [data-lifecycle.md](data-lifecycle.md)。
 
+## 端点清单
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/healthz` | 健康检查 + 版本号 |
+| GET | `/api/v1/stocks/{code}/kline` | 日/周/月 K 线 |
+| GET | `/api/v1/stocks/{code}/kline-minute` | 分钟 K 线 |
+| GET | `/api/v1/stocks/{code}/basic` | 证券基本资料 |
+| GET | `/api/v1/stocks/{code}/dividends` | 分红送转 |
+| GET | `/api/v1/stocks/{code}/adjust-factors` | 复权因子 |
+| GET | `/api/v1/stocks/{code}/analysis` | 综合分析（Markdown） |
+| GET | `/api/v1/stocks/{code}/financials/{report_type}` | 六类季报（profit/operation/growth/balance/cash_flow/dupont） |
+| GET | `/api/v1/stocks/{code}/financials/indicator` | 财务指标汇总 |
+| GET | `/api/v1/stocks/{code}/financials/express` | 业绩快报 |
+| GET | `/api/v1/stocks/{code}/financials/forecast` | 业绩预告 |
+| GET | `/api/v1/indices/{index_code}/constituents` | 指数成分股 |
+| GET | `/api/v1/industries` | 行业分类 |
+| GET | `/api/v1/market/trade-calendar` | 交易日历 |
+| GET | `/api/v1/market/stocks` | 全市场证券列表 |
+| GET | `/api/v1/macro/deposit-rate` | 存款利率 |
+| GET | `/api/v1/macro/loan-rate` | 贷款利率 |
+| GET | `/api/v1/macro/rrr` | 存款准备金率 |
+| GET | `/api/v1/macro/money-supply/month` | 货币供应量（月） |
+| GET | `/api/v1/macro/money-supply/year` | 货币供应量（年） |
+| GET | `/api/v1/dates/latest-trading-day` | 最近交易日 |
+| GET | `/api/v1/dates/is-trading-day` | 是否交易日 |
+| GET | `/api/v1/dates/previous-trading-day` | 前一交易日 |
+| GET | `/api/v1/dates/next-trading-day` | 后一交易日 |
+| GET | `/api/v1/dates/last-trading-days` | 最近 N 个交易日 |
+| GET | `/api/v1/utils/normalize-code` | 证券代码规范化 |
+| GET | `/api/v1/utils/normalize-index-code` | 指数代码规范化 |
+| POST | `/api/v1/tasks/backfill` | 批量回填（异步 202） |
+| GET | `/api/v1/tasks` | 任务列表 |
+| GET | `/api/v1/tasks/stats` | 任务统计 |
+| GET | `/api/v1/tasks/running` | 运行中任务 |
+| GET | `/api/v1/tasks/{task_id}` | 任务详情 |
+
 ## 全局约定
 
 - **Base URL**：`http://<host>:8080`，所有业务接口在 `/api/v1` 前缀下，均为 `GET`（除任务提交）。
@@ -118,4 +155,4 @@ curl localhost:8080/api/v1/tasks/42
 
 | 接口 | 说明 |
 |---|---|
-| `GET /healthz` | 健康检查（compose 健康探针使用） |
+| `GET /healthz` | 健康检查，返回 `{"status":"ok","name":"stockdata-server","version":"1.0.0"}`（compose 健康探针使用） |
