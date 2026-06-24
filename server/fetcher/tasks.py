@@ -28,11 +28,9 @@ from fetcher import writer
 from fetcher.app import app
 from fetcher.providers import baostock as provider
 from fetcher.providers.interface import DataSourceError, NoDataFoundError
+from settings import settings
 
 logger = logging.getLogger(__name__)
-
-_MAX_RETRIES = 2
-_RETRY_BACKOFF = 5
 
 
 def _d(s: str) -> date:
@@ -83,15 +81,29 @@ def _mark(fetch_task_id: int | None, **fields) -> None:
         logger.exception("更新 fetch_task #%s 状态失败", fetch_task_id)
 
 
+def _backoff_seconds(attempt: int) -> int:
+    """第 attempt 次（从 0 起）失败后的退避等待：指数增长并封顶。
+
+    base * 2**attempt → min(·, max_backoff)。默认 30→60→120→180(封顶)→180…，
+    封顶值（settings.fetch_retry_max_backoff_seconds，默认 3 分钟）后维持不变继续重试。
+    """
+    wait = settings.fetch_retry_base_seconds * (2 ** attempt)
+    return min(wait, settings.fetch_retry_max_backoff_seconds)
+
+
 def _run(task, fetch_task_id: int | None, impl) -> dict:
-    """任务统一骨架：状态标记 + DataSourceError 退避重试 + 重试耗尽才 failed。"""
+    """任务统一骨架：状态标记 + DataSourceError 退避重试 + 重试耗尽才 failed。
+
+    长连接由 provider 保持，只在出错时重连；本层负责退避重试（指数增长封顶，
+    见 _backoff_seconds），重试次数 settings.fetch_max_retries 耗尽才标 failed。
+    """
     _mark(
         fetch_task_id,
         status=TaskStatus.RUNNING,
         started_at=_now(),
         celery_task_id=task.request.id,
     )
-    for attempt in range(_MAX_RETRIES + 1):
+    for attempt in range(settings.fetch_max_retries + 1):
         try:
             result = impl()
         except NoDataFoundError as e:
@@ -100,8 +112,8 @@ def _run(task, fetch_task_id: int | None, impl) -> dict:
             _mark(fetch_task_id, status=TaskStatus.FAILED, error=str(e), finished_at=_now())
             raise
         except DataSourceError as e:
-            if attempt < _MAX_RETRIES:
-                wait = _RETRY_BACKOFF * (2 ** attempt)
+            if attempt < settings.fetch_max_retries:
+                wait = _backoff_seconds(attempt)
                 logger.warning("任务失败(第%d次)，%ds 后重试: %s", attempt + 1, wait, e)
                 time.sleep(wait)
                 continue

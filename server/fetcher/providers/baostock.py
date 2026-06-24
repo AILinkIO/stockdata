@@ -40,8 +40,6 @@ _RETRYABLE_CODES = frozenset(
 )
 
 _logged_in = False
-_last_query_at = 0.0
-_IDLE_RELOGIN_SECONDS = 60
 _BS_LOCK = threading.RLock()
 
 
@@ -188,17 +186,15 @@ def _collect_rows(rs, description: str) -> pd.DataFrame:
 def _query(bs_func, description: str, **kwargs) -> pd.DataFrame:
     """调用 API → 校验 → 收集数据；可重试错误重登录后重试一次。
 
+    长连接保持：不做闲置预防性重登录，连接一直复用到出错为止；可重试错误
+    （连接断开/未登录/超时）就地重登录并重试一次（处理闲置后连接僵死的常见情况，
+    无需等待）。仍失败则抛 DataSourceError，由任务层 _run 退避重试。
     _BS_LOCK 串行化所有 baostock 操作（非线程安全）。
-    连接闲置超过 _IDLE_RELOGIN_SECONDS 时预防性重登录。
     限流（_RATE_LIMITER）在取锁前阻塞，避免持锁睡眠。
     """
-    global _last_query_at
     _RATE_LIMITER.acquire()
     with _BS_LOCK:
         ensure_login()
-        if _last_query_at and time.monotonic() - _last_query_at > _IDLE_RELOGIN_SECONDS:
-            logger.info("连接闲置超过 %ds，预防性重新登录", _IDLE_RELOGIN_SECONDS)
-            force_relogin()
         logger.info("正在查询 %s", description)
 
         def _do() -> pd.DataFrame:
@@ -208,9 +204,8 @@ def _query(bs_func, description: str, **kwargs) -> pd.DataFrame:
             return df
 
         try:
-            result = _do()
+            return _do()
         except NoDataFoundError:
-            _last_query_at = time.monotonic()
             raise
         except Exception as e:
             if not _is_retryable_error(e):
@@ -219,9 +214,7 @@ def _query(bs_func, description: str, **kwargs) -> pd.DataFrame:
                 raise DataSourceError(f"{description}: 未预期错误 - {e}") from e
             logger.warning("%s: 可重试错误，重新登录后重试一次: %s", description, e)
             force_relogin()
-            result = _do()
-        _last_query_at = time.monotonic()
-        return result
+            return _do()
 
 
 # ── K 线默认字段（按频率区分，与旧实现一致） ──

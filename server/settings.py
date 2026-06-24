@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     baostock_socket_timeout: int = 30  # baostock TCP 超时：挂死靠它快速失败重连
     fetch_rate_limit_per_minute: int = 60  # 每分钟最多向数据源发起的查询次数（防 IP 拉黑），<=0 关闭
 
+    # ── 抓取重试/退避（DataSourceError，任务层 _run 统一处理） ──
+    fetch_max_retries: int = 8          # 退避重试次数上限，耗尽才标记 failed
+    fetch_retry_base_seconds: int = 30  # 指数退避基数（30→60→120→…）
+    fetch_retry_max_backoff_seconds: int = 180  # 单次退避等待封顶（默认 3 分钟）
+
     # ── API 读穿透 ──
     fetch_wait_timeout: int = 120      # 读穿透轮询等待抓取任务完成的超时（秒）
 
