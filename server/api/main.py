@@ -14,11 +14,14 @@ Celery worker + beat 以 solo pool 运行在 API 进程的 daemon thread 中（�
 
 import logging
 from contextlib import asynccontextmanager
+from importlib.metadata import version as _pkg_version
 
 from fastapi import FastAPI
 
 from api.errors import register_exception_handlers
 from api.routers import dates, financials, indices, macro, market, stocks, tasks, utils
+
+_VERSION = _pkg_version("stockdata")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,7 +40,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(
     title="stockdata",
     description="中国 A 股市场数据服务（Baostock 数据源 + PostgreSQL 数据仓库）",
-    version="1.0.0",
+    version=_VERSION,
     lifespan=lifespan,
 )
 
@@ -55,4 +58,4 @@ app.include_router(tasks.router)
 
 @app.get("/healthz", tags=["meta"])
 def healthz():
-    return {"status": "ok"}
+    return {"status": "ok", "name": "stockdata-server", "version": _VERSION}

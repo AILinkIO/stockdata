@@ -28,6 +28,11 @@ builder.Services
 var app = builder.Build();
 
 app.MapMcp("/mcp");
-app.MapGet("/healthz", () => Results.Json(new { status = "ok" }));
+app.MapGet("/healthz", () => Results.Json(new
+{
+    status = "ok",
+    name = "stockdata-mcp",
+    version = typeof(Program).Assembly.GetName().Version?.ToString() ?? "0.0.0",
+}));
 
 app.Run("http://0.0.0.0:8000"); // 沿用旧 Python MCP 的端口，存量客户端配置不变
