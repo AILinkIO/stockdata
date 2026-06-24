@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     # ── baostock ──
     baostock_socket_timeout: int = 30  # baostock TCP 超时：挂死靠它快速失败重连
     fetch_rate_limit_per_minute: int = 60  # 每分钟最多向数据源发起的查询次数（防 IP 拉黑），<=0 关闭
+    rate_limit_backend: str = "memory"  # 限流实现：memory（进程内）或 redis（跨进程）
+    rate_limit_redis_url: str = ""  # 限流 Redis 地址，空则复用 broker_url
 
     # ── 抓取重试/退避（DataSourceError，任务层 _run 统一处理） ──
     fetch_max_retries: int = 8          # 退避重试次数上限，耗尽才标记 failed
