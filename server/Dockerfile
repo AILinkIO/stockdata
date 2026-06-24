@@ -19,5 +19,8 @@ RUN uv sync --frozen --no-dev
 # 再拷源码（.dockerignore 排除 .env/.venv/缓存等）
 COPY . .
 
+# 运行时冻结：uv run 不重锁/不联网校验，启动秒级且不卡健康检查
+ENV UV_FROZEN=true
+
 # 默认命令为 API；fetcher/beat 由 compose 覆盖 command
 CMD ["uv", "run", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8080"]

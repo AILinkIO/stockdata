@@ -19,7 +19,7 @@ services:
   # 一次性：建/升级 schema 后退出，其余服务等它成功才启动
   migrate:
     <<: *server
-    command: uv run alembic upgrade head
+    command: uv run --no-dev alembic upgrade head
     restart: "no"
 
   # API + 内嵌 Celery worker + beat（daemon thread，solo pool 串行执行 + 定时调度）
@@ -27,12 +27,12 @@ services:
     <<: *server
     restart: unless-stopped
     stop_grace_period: 120s
-    command: uv run uvicorn api.main:app --host 0.0.0.0 --port 8080
+    command: uv run --no-dev uvicorn api.main:app --host 0.0.0.0 --port 8080
     depends_on:
       migrate:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "uv", "run", "python", "-c",
+      test: ["CMD", ".venv/bin/python", "-c",
              "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
       interval: 30s
       timeout: 5s
