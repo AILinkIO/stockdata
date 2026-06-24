@@ -13,15 +13,21 @@ Celery worker + beat 以 solo pool 运行在 API 进程的 daemon thread 中（�
 """
 
 import logging
+import tomllib
 from contextlib import asynccontextmanager
 from importlib.metadata import version as _pkg_version
+from pathlib import Path
 
 from fastapi import FastAPI
 
 from api.errors import register_exception_handlers
 from api.routers import dates, financials, indices, macro, market, stocks, tasks, utils
 
-_VERSION = _pkg_version("stockdata")
+try:
+    _VERSION = _pkg_version("stockdata")
+except Exception:
+    with open(Path(__file__).resolve().parents[1] / "pyproject.toml", "rb") as f:
+        _VERSION = tomllib.load(f)["project"]["version"]
 
 logging.basicConfig(
     level=logging.INFO,
