@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using StockData.Mcp.Data.Entities;
 
@@ -13,7 +14,21 @@ namespace StockData.Mcp.Data;
 public class StockDataDbContext(DbContextOptions<StockDataDbContext> options) : DbContext(options)
 {
     public DbSet<Kline> Klines => Set<Kline>();
+    public DbSet<KlineMinute> KlineMinutes => Set<KlineMinute>();
     public DbSet<DataWatermark> DataWatermarks => Set<DataWatermark>();
+    public DbSet<AdjustFactor> AdjustFactors => Set<AdjustFactor>();
+    public DbSet<Dividend> Dividends => Set<Dividend>();
+    public DbSet<FinancialReport> FinancialReports => Set<FinancialReport>();
+    public DbSet<StockBasic> StockBasics => Set<StockBasic>();
+    public DbSet<TradeCalendar> TradeCalendars => Set<TradeCalendar>();
+    public DbSet<StockListSnapshot> StockListSnapshots => Set<StockListSnapshot>();
+    public DbSet<IndexConstituent> IndexConstituents => Set<IndexConstituent>();
+    public DbSet<StockIndustry> StockIndustries => Set<StockIndustry>();
+    public DbSet<DepositRate> DepositRates => Set<DepositRate>();
+    public DbSet<LoanRate> LoanRates => Set<LoanRate>();
+    public DbSet<RequiredReserveRatio> RequiredReserveRatios => Set<RequiredReserveRatio>();
+    public DbSet<MoneySupplyMonth> MoneySupplyMonths => Set<MoneySupplyMonth>();
+    public DbSet<MoneySupplyYear> MoneySupplyYears => Set<MoneySupplyYear>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -60,5 +75,22 @@ public class StockDataDbContext(DbContextOptions<StockDataDbContext> options) : 
             e.Property(w => w.LastFetchedAt).HasColumnName("last_fetched_at")
                 .HasColumnType("timestamp with time zone").IsRequired();
         });
+
+        // 属性名 AdjustFactorValue ≠ 列名（列名 adjust_factor，与类名同不可作属性名）
+        b.Entity<AdjustFactor>().Property(a => a.AdjustFactorValue).HasColumnName("adjust_factor");
+
+        // 其余实体（P5 移植）：用 snake_case 约定自动映射表名/列名（避免逐列手写），
+        // updated_at 统一默认 now()。已显式映射的列([Column]/Fluent，如带数字列名的宏观表)跳过，不覆盖。
+        foreach (var entity in b.Model.GetEntityTypes())
+        {
+            entity.SetTableName(ToSnakeCase(entity.ClrType.Name));
+            foreach (var prop in entity.GetProperties())
+                if (prop.GetColumnName() == prop.Name)   // 未显式映射才套约定
+                    prop.SetColumnName(ToSnakeCase(prop.Name));
+            entity.FindProperty(nameof(Kline.UpdatedAt))?.SetDefaultValueSql("now()");
+        }
     }
+
+    private static string ToSnakeCase(string name)
+        => Regex.Replace(name, "(?<=[a-z0-9])(?=[A-Z])", "_").ToLowerInvariant();
 }

@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using StockData.Mcp.Data;
@@ -11,9 +12,11 @@ using StockData.Mcp.Data;
 namespace StockData.Mcp.Data.Migrations
 {
     [DbContext(typeof(StockDataDbContext))]
-    partial class StockDataDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260625032953_AddMacroTables")]
+    partial class AddMacroTables
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -373,61 +376,6 @@ namespace StockData.Mcp.Data.Migrations
                     b.HasKey("Code", "Frequency", "TradeDate");
 
                     b.ToTable("kline", (string)null);
-                });
-
-            modelBuilder.Entity("StockData.Mcp.Data.Entities.KlineMinute", b =>
-                {
-                    b.Property<string>("Code")
-                        .HasMaxLength(12)
-                        .HasColumnType("character varying(12)")
-                        .HasColumnName("code");
-
-                    b.Property<short>("Frequency")
-                        .HasColumnType("smallint")
-                        .HasColumnName("frequency");
-
-                    b.Property<DateTimeOffset>("BarTime")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("bar_time");
-
-                    b.Property<decimal?>("Amount")
-                        .HasPrecision(20, 4)
-                        .HasColumnType("numeric(20,4)")
-                        .HasColumnName("amount");
-
-                    b.Property<decimal?>("Close")
-                        .HasPrecision(12, 4)
-                        .HasColumnType("numeric(12,4)")
-                        .HasColumnName("close");
-
-                    b.Property<decimal?>("High")
-                        .HasPrecision(12, 4)
-                        .HasColumnType("numeric(12,4)")
-                        .HasColumnName("high");
-
-                    b.Property<decimal?>("Low")
-                        .HasPrecision(12, 4)
-                        .HasColumnType("numeric(12,4)")
-                        .HasColumnName("low");
-
-                    b.Property<decimal?>("Open")
-                        .HasPrecision(12, 4)
-                        .HasColumnType("numeric(12,4)")
-                        .HasColumnName("open");
-
-                    b.Property<DateTimeOffset>("UpdatedAt")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("updated_at")
-                        .HasDefaultValueSql("now()");
-
-                    b.Property<long?>("Volume")
-                        .HasColumnType("bigint")
-                        .HasColumnName("volume");
-
-                    b.HasKey("Code", "Frequency", "BarTime");
-
-                    b.ToTable("kline_minute");
                 });
 
             modelBuilder.Entity("StockData.Mcp.Data.Entities.LoanRate", b =>
