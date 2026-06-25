@@ -1,48 +1,22 @@
-# stockdata 全栈混合部署（仓库根目录，一键拉起见 ./up.sh）：
+# stockdata 部署（仓库根目录，一键拉起见 ./up.sh）：
 #   - PostgreSQL 与 Valkey(Redis) 使用物理机服务（127.0.0.1）
-#   - api（内嵌 Celery worker + beat）/ mcp（dotnet-mcp/）在容器中
-# 容器走 host 网络直连本机服务，server/.env 中的 127.0.0.1 DSN 零改动。
+#   - fetch（无状态 baostock 抓取微服务）/ mcp（dotnet，唯一 PG 属主 + 全部工具 serving）在容器中
+# 容器走 host 网络直连本机服务。旧 api/Celery/alembic 已下线（数据落盘与 serving 全在 dotnet）。
 #
 #   ./up.sh                       # 等价于 sudo docker compose up -d --build
 #   sudo docker compose ps
 
 name: stockdata
 
-# server 共享基座：同一镜像、host 网络、同一 .env
-x-server: &server
-  image: stockdata-server
-  build: ./server
-  network_mode: host        # 直连物理机 127.0.0.1 的 PG/Valkey
-  env_file: server/.env     # 注入 STOCKDATA_*（DSN、队列地址、限流等）
-
 services:
-  # 一次性：建/升级 schema 后退出，其余服务等它成功才启动
-  migrate:
-    <<: *server
-    command: uv run --no-dev alembic upgrade head
-    restart: "no"
-
-  # API + 内嵌 Celery worker + beat（daemon thread，solo pool 串行执行 + 定时调度）
-  api:
-    <<: *server
-    restart: unless-stopped
-    stop_grace_period: 120s
-    command: uv run --no-dev uvicorn api.main:app --host 0.0.0.0 --port 8080
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-    healthcheck:
-      test: ["CMD", ".venv/bin/python", "-c",
-             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
-  # 新数据逻辑：无状态 baostock 抓取微服务（fetch_service/），:8090 异步 submit+poll。
+  # 无状态 baostock 抓取微服务（fetch_service/），:8090 异步 submit+poll。
   # baostock 登录惰性（首次 /fetch 才登录）；healthz 不触 baostock。⚠️ 进程长驻、勿频繁重启
   # （每次重启=新 bs.login，间隔须 >5min，见 TASK §0）。
   fetch:
-    <<: *server
+    image: stockdata-fetch
+    build: ./server
+    network_mode: host        # 直连物理机 127.0.0.1 的 PG/Valkey
+    env_file: server/.env     # 注入 STOCKDATA_*（DSN、限流等）
     restart: unless-stopped
     stop_grace_period: 30s
     command: uv run --no-dev uvicorn fetch_service.app:app --host 0.0.0.0 --port 8090
@@ -53,14 +27,13 @@ services:
       timeout: 5s
       retries: 3
 
-  # MCP 服务（dotnet-mcp 工程）：:8000 Streamable HTTP。
-  # 管线开关 ON → get_historical_k_data 的 d/w/m 不复权走 dotnet（直读/落盘 PG + 调 fetch）；
-  # 其余工具仍走旧 REST（ApiBase，未启 api 则失败，本次只测 k_d）。
+  # MCP 服务（dotnet-mcp 工程）：:8000 Streamable HTTP。唯一 PG 属主 + 全部工具 serving。
+  # 管线 ON → 工具走 dotnet（直读/落盘 PG + 调 fetch）。ApiBase 为旧 REST 兜底（已下线，管线 ON 不会用到）。
   mcp:
     image: stockdata-mcp
     build: ./dotnet-mcp
     network_mode: host
-    env_file: server/.env     # 注入 STOCKDATA_PG_DSN（dotnet 落盘直连 PG）
+    env_file: server/.env     # 注入 STOCKDATA_PG_DSN（dotnet 直连 PG）
     environment:
       StockData__ApiBase: http://127.0.0.1:8080
       StockData__PipelineEnabled: "true"
