@@ -239,6 +239,10 @@
   `UtilTools` 用 CodeNormalizer+指数映射（纯函数）、`get_adjust_factor_data`→`AdjustFactorReadService`、
   `get_stock_analysis`→`StockAnalysisService`（港 Markdown 报告，聚合基本/行业/财报/K线）。
   compose 删 migrate/api 服务（只剩 fetch+mcp，镜像 stockdata-fetch）。重建两容器，MCP 协议实测全过。单测 148/148。
+  **配置/文档清理**：`settings.py` 砍到仅 fetch 所需 8 项（删 pg_dsn/broker/result/visibility/wait/minute_backfill），
+  `baostock.py` 去掉 broker_url 兜底；`.env`/`.env.example` 删 Celery broker/result、加 FETCH_JOB_REDIS_URL、重排注释；
+  删 `server/docs/`（本次迁移前那轮重构的过时文档，引用已删代码）；根 `README.md` 与 `server/README.md` 重写为
+  新架构（dotnet 属主 + Python fetch 微服务，含「fetch 如何工作」）。配置变更随下次 fetch 重建生效，现网容器不受影响。
 - ⬜ **P8 切换与验证**
   流量切到 dotnet 路径（红线 #3：切换瞬间只一套登录态）；验证全类型读穿透、定时同步、
   幂等重投；保留回退开关。
