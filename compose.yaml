@@ -38,16 +38,36 @@ services:
       timeout: 5s
       retries: 3
 
-  # MCP 服务（dotnet-mcp 工程）：透传 REST + TA-Lib 指标分析，:8000 Streamable HTTP
+  # 新数据逻辑：无状态 baostock 抓取微服务（fetch_service/），:8090 异步 submit+poll。
+  # baostock 登录惰性（首次 /fetch 才登录）；healthz 不触 baostock。⚠️ 进程长驻、勿频繁重启
+  # （每次重启=新 bs.login，间隔须 >5min，见 TASK §0）。
+  fetch:
+    <<: *server
+    restart: unless-stopped
+    stop_grace_period: 30s
+    command: uv run --no-dev uvicorn fetch_service.app:app --host 0.0.0.0 --port 8090
+    healthcheck:
+      test: ["CMD", ".venv/bin/python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # MCP 服务（dotnet-mcp 工程）：:8000 Streamable HTTP。
+  # 管线开关 ON → get_historical_k_data 的 d/w/m 不复权走 dotnet（直读/落盘 PG + 调 fetch）；
+  # 其余工具仍走旧 REST（ApiBase，未启 api 则失败，本次只测 k_d）。
   mcp:
     image: stockdata-mcp
     build: ./dotnet-mcp
     network_mode: host
+    env_file: server/.env     # 注入 STOCKDATA_PG_DSN（dotnet 落盘直连 PG）
     environment:
       StockData__ApiBase: http://127.0.0.1:8080
+      StockData__PipelineEnabled: "true"
+      StockData__FetchBase: http://127.0.0.1:8090
     restart: unless-stopped
     depends_on:
-      api:
+      fetch:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/healthz"]
