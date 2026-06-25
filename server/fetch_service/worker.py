@@ -80,7 +80,7 @@ def _query(task_type: str, params: dict) -> dict:
     raise ValueError(f"不支持的抓取类型: {task_type}")
 
 
-def _run_job(store: JobStore, job_id: str) -> None:
+def _run_job(store: JobStore, job_id: str, stop: threading.Event) -> None:
     task = store.task_of(job_id)
     if task is None:
         return
@@ -88,6 +88,8 @@ def _run_job(store: JobStore, job_id: str) -> None:
 
     store.mark_running(job_id)
     for attempt in range(settings.fetch_max_retries + 1):
+        if stop.is_set():
+            return  # 关停：放弃重试，不再触发登录（job 留 running，由 TTL/重投回收）
         try:
             store.mark_done(job_id, _query(task_type, params))
             return
@@ -100,7 +102,8 @@ def _run_job(store: JobStore, job_id: str) -> None:
                 wait = _backoff_seconds(attempt)
                 logger.warning("抓取失败(第%d次)，%ds 后重试: %s", attempt + 1, wait, e)
                 store.mark_running(job_id)  # 续期心跳
-                time.sleep(wait)
+                if stop.wait(wait):         # 可中断退避：关停立即返回，不再重连重试
+                    return
                 continue
             store.mark_failed(job_id, str(e))
             return
@@ -115,14 +118,16 @@ def _loop(store: JobStore, stop: threading.Event) -> None:
         try:
             job_id = store.next_pending(timeout=5)
             if job_id:
-                _run_job(store, job_id)
+                _run_job(store, job_id, stop)
         except Exception:  # noqa: BLE001
             logger.exception("worker 循环异常，继续")
             time.sleep(1)
+    logger.info("抓取 worker 已停止")
 
 
-def start_worker(store: JobStore) -> threading.Event:
-    """启动单个 daemon worker 线程，返回 stop 事件。"""
+def start_worker(store: JobStore) -> tuple[threading.Event, threading.Thread]:
+    """启动单个 daemon worker 线程，返回 (stop 事件, 线程)。"""
     stop = threading.Event()
-    threading.Thread(target=_loop, args=(store, stop), daemon=True, name="fetch-worker").start()
-    return stop
+    thread = threading.Thread(target=_loop, args=(store, stop), daemon=True, name="fetch-worker")
+    thread.start()
+    return stop, thread

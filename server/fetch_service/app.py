@@ -19,6 +19,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Response
 from pydantic import BaseModel
 
+from fetcher.providers import baostock as provider
+
 from .jobs import JobStore
 from .worker import start_worker
 
@@ -27,6 +29,7 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+logger = logging.getLogger(__name__)
 
 _store = JobStore()
 
@@ -38,11 +41,16 @@ class FetchRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    stop = start_worker(_store)
+    stop, thread = start_worker(_store)
     try:
         yield
     finally:
+        # 关停顺序：先停 worker（中断退避、不再重试登录）→ 等其退出释放 _BS_LOCK
+        # → 干净登出 baostock（让服务端及时回收会话，下次登录不易被判异常重复会话）
         stop.set()
+        thread.join(timeout=10)
+        provider.logout()
+        logger.info("已登出 baostock，进程退出")
 
 
 app = FastAPI(title="stockdata-fetch", lifespan=lifespan)

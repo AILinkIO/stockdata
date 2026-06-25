@@ -122,13 +122,25 @@ def force_relogin() -> None:
 
 
 def logout() -> None:
+    """干净登出 baostock（进程关停时调用）。
+
+    取 _BS_LOCK 串行化，避免与正在进行的查询并发操作全局连接；拿不到锁
+    （worker 仍卡在某次查询里）则只清登录标志、跳过 bs.logout，避免并发调用。
+    """
     global _logged_in
-    try:
-        with _suppress_stdout():
-            bs.logout()
-    except Exception:
-        pass
-    _logged_in = False
+    if _BS_LOCK.acquire(timeout=5):
+        try:
+            if _logged_in:  # 未登录则无会话可登出，跳过（连接 recv 已带 login 时的超时，不会久挂）
+                with _suppress_stdout():
+                    bs.logout()
+                logger.info("Baostock 已登出 (pid=%s)", os.getpid())
+        except Exception:
+            pass
+        finally:
+            _logged_in = False
+            _BS_LOCK.release()
+    else:
+        _logged_in = False
 
 
 # ── 通用查询流程 ──
