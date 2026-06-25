@@ -23,7 +23,7 @@ import pandas as pd
 from core.ratelimit import create_rate_limiter
 from settings import settings
 
-from .interface import DataSourceError, LoginError, NoDataFoundError
+from .interface import BlacklistError, DataSourceError, LoginError, NoDataFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +34,21 @@ _RETRYABLE_CODES = frozenset(
         "10002001",  # 网络错误
         "10002002",  # 网络连接失败
         "10002004",  # 连接断开
-        "10002007",  # 网络接收错误
     }
 )
+
+# 致命错误码：出口 IP 被拉黑 / 持续接收错误。短期无法取数、重试只会延长封禁，
+# 一旦命中即抛 BlacklistError → 任务层退出进程（见 interface.BlacklistError）。
+_BLACKLIST_CODES = frozenset(
+    {
+        "10001011",  # 黑名单用户
+        "10002007",  # 网络接收错误（实测为长时间不可恢复，按拉黑处置）
+    }
+)
+
+
+def _is_blacklist(code: str, msg: str) -> bool:
+    return code in _BLACKLIST_CODES or "黑名单" in msg
 
 _logged_in = False
 _BS_LOCK = threading.RLock()
@@ -50,6 +62,8 @@ _RATE_LIMITER = create_rate_limiter(
 
 
 def _is_retryable_error(exc: Exception) -> bool:
+    if isinstance(exc, BlacklistError):  # 致命：绝不重试
+        return False
     if isinstance(exc, TimeoutError):  # socket 超时（socket.timeout 是其别名）
         return True
     msg = str(exc)
@@ -105,9 +119,23 @@ def ensure_login() -> None:
     finally:
         socket.setdefaulttimeout(prev)
     if lg.error_code != "0":
+        if _is_blacklist(lg.error_code, lg.error_msg):
+            raise BlacklistError(
+                f"Baostock 登录被拉黑: {lg.error_msg} (code: {lg.error_code})"
+            )
         raise LoginError(f"Baostock 登录失败: {lg.error_msg} (code: {lg.error_code})")
     _logged_in = True
     logger.info("Baostock 登录成功 (pid=%s)", os.getpid())
+
+
+def reset_login_state() -> None:
+    """惰性丢弃当前会话标志（不发起网络调用）：下次查询时重新 ensure_login。
+
+    供 /restart 清除暂停态后调用——拉黑期间的旧连接可能已僵死，置 _logged_in=False
+    让下个 job 走全新登录，而非复用坏连接。不主动 login（避免在仍被拉黑时立即重撞）。
+    """
+    global _logged_in
+    _logged_in = False
 
 
 def force_relogin() -> None:
@@ -152,6 +180,8 @@ def _check_api_error(rs, description: str) -> None:
     msg = f"{description}: {rs.error_msg} (code: {rs.error_code})"
     if "no record found" in rs.error_msg.lower() or rs.error_code == "10002":
         raise NoDataFoundError(msg)
+    if _is_blacklist(rs.error_code, rs.error_msg):
+        raise BlacklistError(msg)
     raise DataSourceError(msg)
 
 
