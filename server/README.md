@@ -1,111 +1,119 @@
-# stockdata
+# fetch_service — 无状态 baostock 抓取微服务
 
-中国 A 股市场数据服务。数据源为 [Baostock](http://baostock.com/)，
-PostgreSQL 做数据仓库，Celery（嵌入式 worker + beat，API 进程内 solo pool 串行执行）负责抓取任务的队列调度与定时同步，
-FastAPI 对外提供 REST 接口。
+只做一件事：**收到「抓什么」的请求 → 调 [Baostock](http://baostock.com/) → 把原始数据返回**。
+**不碰数据库**——数据落盘与全部 serving 由 dotnet（[../dotnet-mcp/](../dotnet-mcp/)）负责。
 
-文档：[API 参考](docs/api.md) · [数据生命周期（读穿透/缺口补抓/复权）](docs/data-lifecycle.md) · [架构设计](docs/refactor-design.md)
+异步 submit + poll 模型：调用方提交 job、轮询取结果；内部单 worker 串行消费，限流防 IP 拉黑。
 
-## 功能
+## HTTP 接口
 
-- **股票行情** — K 线（日/周/月/分钟级）、基本信息、分红送转、复权因子（前/后复权读时计算）
-- **财务报表** — 盈利/营运/成长/偿债/现金流/杜邦六类季报、业绩快报/预告、综合财务指标
-- **指数与行业** — 上证 50、沪深 300、中证 500 成分股，行业分类
-- **市场概览** — 交易日历、全部股票列表
-- **宏观经济** — 存贷款利率、存款准备金率、货币供应量
-- **日期工具** — 最新交易日、交易日判断、前后交易日
-- **分析报告** — 个股基本面 / 技术面 / 综合分析（Markdown）
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/fetch` | 提交抓取 job，立即返回 `202 {job_id, status, dedup}`（不阻塞） |
+| `GET` | `/fetch/{job_id}` | 查询：`{job_id, status, payload?, error?}`，`status ∈ {pending,running,done,failed}` |
+| `GET` | `/healthz` | 健康检查（不触 baostock） |
 
-数据按需抓取（读穿透：缺数据时同步抓取并等待），辅以每日定时同步：
-交易日历、股票列表、指数成分股、行业分类，以及**已入库代码的交易信息增量同步**
-（每交易日收盘后遍历水位表，对所有跟踪中的标的补抓 K 线/复权因子到当日）。
+**提交示例**
 
-## 架构
-
-```
-HTTP ──▶ api/（FastAPI + 内嵌 Celery worker + beat）──读──▶ PostgreSQL
-               │ 缺数据时投递任务到进程内队列              ▲
-               │（daemon thread, solo pool 串行执行）     │ 写
-               │ beat 定时调度（收盘后同步市场数据）       │
-               └─────▶ Redis 队列 ────────────────────────┘
+```jsonc
+POST /fetch
+{ "type": "fetch_kline",
+  "params": { "code": "sh.600000", "start_date": "2024-01-01",
+              "end_date": "2024-03-31", "frequency": "d" } }
+→ 202 { "job_id": "...", "status": "pending", "dedup": false }
 ```
 
-- **嵌入式 worker + beat**：Celery worker 和 beat 均运行在 API 进程的 daemon thread 中，
-  无需独立进程/容器。任务串行执行，天然满足 baostock 单线程约束；beat 定时投递同步任务。
-- API 读穿透：缺数据时 `send_task()` 投递到 Redis 队列，`AsyncResult.get()` 阻塞等待结果；
-  同参数的 pending/running 任务由部分唯一索引去重，撞重复时轮询等待已有任务完成。
-- 批量回填：`POST /api/v1/tasks/backfill` 返回 202 + task_id，客户端轮询 `GET /api/v1/tasks/{id}`。
-- baostock 全局 TCP 连接的挂死由 **socket 超时**（`setdefaulttimeout`）解决：
-  查询 recv 在超时处快速失败，重登录后重试，不依赖进程隔离或 SIGKILL。
-- 只存原始事实（不复权 K 线 + 复权因子序列），复权价读取时计算，除权事件零失效。
-- 新鲜度规则（历史数据永久、盘中 5 分钟、财报披露期等）见 `db/coverage.py`。
+**结果**（`done` 时）：`payload` 为 baostock 原始返回（全字符串，dotnet 侧解析）
 
-## 快速开始
+```jsonc
+{ "job_id": "...", "status": "done",
+  "payload": { "fields": ["date","code","open", ...],
+               "rows": [["2024-01-02","sh.600000","10.20", ...], ...] } }
+```
 
-需要 Python 3.14+、PostgreSQL 17、Redis 协议服务（Redis/Valkey），
-使用 [uv](https://docs.astral.sh/uv/) 管理依赖。
+### 支持的抓取类型（`type`）
+
+`fetch_kline`（日/周/月/分钟，frequency 区分）、`fetch_adjust_factor`（复权因子，恒全量）、
+`fetch_dividend`、`fetch_trade_calendar`、`fetch_stock_basic`、`fetch_stock_list`、
+`fetch_industry`、`fetch_index_constituent`、`fetch_macro`（存贷款利率/准备金率/货币供应）、
+`fetch_performance`（业绩快报/预告）、`fetch_financial_report`（六类季报，payload 为 `[report_type, record]`）。
+
+## 工作机制
+
+- **单 worker 串行** — 满足 baostock 单连接约束；job 从 Redis 队列取出逐个执行。
+- **去重搭车** — 同 `(type, params)` 的 `params_hash` 抢占去重索引，并发请求复用同一 job、只抓一次。
+- **长驻 baostock 会话** — 惰性登录（首次抓取才 `bs.login`），长连接复用，出错才重连。
+- **限流防拉黑 / 退避重试 / Redis job 存储** — 详见下方「配置」节的「限流机制」「退避重试」「Redis 布局」三小节。
+
+> ⚠️ **进程长驻、勿频繁重启**：每次重启 = 一次新 `bs.login`，间隔须 **> 5 分钟**，
+> 否则可能被 baostock 判异常登录频次而拉黑。健康检查/滚动发布/crash-loop 退避都要满足这条下限。
+
+## 配置
+
+环境变量前缀 `STOCKDATA_`，可写入本目录 `.env`（见 [.env.example](.env.example)）。
+fetch 与 mcp **共用同一份 `.env`**——`PG_DSN` 只有 mcp 读，其余只有 fetch 读。
+
+| 变量 | 默认 | 读取方 | 说明 |
+|---|---|---|---|
+| `PG_DSN` | — | **mcp** | dotnet 连 PG 的 DSN（`postgresql+psycopg://…`）。**fetch 不读**（Python 不碰 PG） |
+| `FETCH_RATE_LIMIT_PER_MINUTE` | `60` | fetch | 每分钟最多向 baostock 发起的查询次数；**`<=0` 关闭限流** |
+| `RATE_LIMIT_BACKEND` | `redis` | fetch | 限流实现：`memory`（进程内）/ `redis`（跨进程共享） |
+| `RATE_LIMIT_REDIS_URL` | `redis://127.0.0.1:6379/1` | fetch | `backend=redis` 时的 Redis 地址（建议独立 DB） |
+| `FETCH_JOB_REDIS_URL` | `redis://127.0.0.1:6379/2` | fetch | job 状态/去重/结果存储（独立 DB，避免与限流冲突） |
+| `BAOSTOCK_SOCKET_TIMEOUT` | `30` | fetch | baostock TCP 超时（秒）：挂死时靠它快速失败重连 |
+| `FETCH_MAX_RETRIES` | `8` | fetch | `DataSourceError` 退避重试次数上限，耗尽才标 `failed` |
+| `FETCH_RETRY_BASE_SECONDS` | `30` | fetch | 退避基数（见下「退避重试」） |
+| `FETCH_RETRY_MAX_BACKOFF_SECONDS` | `180` | fetch | 单次退避等待封顶 |
+
+> `.env` 由 compose 的 `env_file` 在**容器启动时**注入；改了 `.env` 需重启容器才生效
+> （fetch 重启 = 一次新 `bs.login`，注意 >5min 间隔）。
+
+### 限流机制（防 IP 拉黑）
+
+baostock 按 IP 限制查询频率，过频会被拉黑。两道防线：**单 worker 串行** + **滑动窗口限流**。
+provider 在**每次** baostock 查询前 `acquire()` 一个额度（`core/ratelimit.py`）：
+
+- **滑动窗口语义** — 任意 `period`（60s）内最多放行 `max_calls`（默认 60）次；窗口内允许突发到上限，
+  之后阻塞，直到最早的一次调用滑出窗口腾出额度。不是「整秒重置」的固定窗口，更平滑。
+- **`memory` 后端** — 进程内 `deque` 记录每次调用时间戳 + `threading.Lock`，零外部依赖，**适合单实例**。
+- **`redis` 后端** — 所有实例共享一个 Redis ZSET key（`ratelimit:baostock`），用 **Lua 脚本原子**完成
+  「清过期成员 → 计数 → 未满则入队 / 已满则返回需等待毫秒」。**多实例/多进程安全**，本项目默认用它
+  （即便单 worker，也便于将来横向扩展或与其它进程共享额度）。
+- `acquire()` 额度耗尽时**阻塞等待**（memory: sleep 到最早调用滑出；redis: sleep 返回的 wait_ms 后重试），
+  因此抓取整体不会超过设定速率，单 worker 串行天然不并发打 baostock。
+- `FETCH_RATE_LIMIT_PER_MINUTE <= 0` 时所有方法直接通过（关闭限流，仅测试用）。
+
+### 退避重试
+
+worker 对可重试的 `DataSourceError`（连接断开/超时等）做**指数退避**：
+第 n 次失败后等待 `base × 2ⁿ` 秒、封顶 `max_backoff`，默认 `30 → 60 → 120 → 180 → 180 …`；
+重试到 `FETCH_MAX_RETRIES` 次仍失败才标 `failed`。`NoDataFoundError`（停牌/未发布）是**合法空结果**，
+直接 `done` 空 payload，由 dotnet 按水位规则处理，不算失败。
+
+### Redis 布局
+
+| DB | 用途 | key |
+|---|---|---|
+| db1 | 限流滑动窗口 | `ratelimit:baostock`（ZSET） |
+| db2 | job 存储 | `job:{id}`(hash 状态) / `job:result:{id}`(payload) / `job:idx:{params_hash}`(去重索引) / `fetch:pending`(待消费队列 list) |
+
+TTL：完成态 job + payload + 去重索引 600s；在途 job 心跳续期至 1200s（僵尸阈值），超时则释放去重、由调用方重建。
+
+## 运行
 
 ```bash
-# 安装依赖
-uv sync
+# 本地（需 Redis 在跑）
+uv run --no-dev uvicorn fetch_service.app:app --host 0.0.0.0 --port 8090
 
-# 配置（本工程目录 server/ 下的 .env）
-# STOCKDATA_PG_DSN=postgresql+psycopg://stockdata:<password>@127.0.0.1:5432/stockdata
-# STOCKDATA_BROKER_URL=redis://127.0.0.1:6379/2
-# STOCKDATA_RESULT_BACKEND=redis://127.0.0.1:6379/3
-
-# 初始化数据库
-uv run alembic upgrade head
-
-# 启动方式一：Docker Compose（推荐；compose.yaml 在仓库根目录，含 mcp 服务）
-# PG/Valkey 用物理机服务，api（内嵌 worker + beat）在容器（host 网络直连 127.0.0.1）；
-# migrate 服务先跑 alembic upgrade head，成功后其余服务才启动
-cd .. && ./up.sh          # 等价于 sudo docker compose up -d --build
-
-# 启动方式二：裸机进程（开发/调试）
-uv run uvicorn api.main:app --host 0.0.0.0 --port 8080  # API（内嵌 Celery worker + beat）
-# 裸机常驻可用 systemd 单元（deploy/）；
-# 两种方式二选一，不可同时运行（端口会冲突）
+# 容器（仓库根目录）
+../up.sh           # 构建并拉起 fetch + mcp
 ```
 
-接口文档：<http://localhost:8080/docs>
-
-数据获取与任务提交均通过 REST：数据端点自带读穿透（缺数据自动投递抓取任务并等待），
-批量回填走 `POST /api/v1/tasks/backfill`（202 异步，轮询 `GET /api/v1/tasks/{id}` 查状态）。
-
-```bash
-# 示例
-curl "localhost:8080/api/v1/stocks/600000/kline?start_date=2024-01-01&end_date=2024-12-31"
-curl "localhost:8080/api/v1/stocks/600000/kline?start_date=2024-01-01&end_date=2024-12-31&adjust_flag=2"  # 前复权
-curl "localhost:8080/api/v1/stocks/600000/financials/profit?year=2024&quarter=3"
-curl "localhost:8080/api/v1/stocks/600000/analysis"
-curl "localhost:8080/api/v1/dates/latest-trading-day"
-```
-
-## 项目结构
+## 代码结构
 
 ```
-api/                  # FastAPI 应用
-├── routers/          # REST 路由（行情/财报/指数/市场/宏观/日期/工具/任务）
-├── services/         # 读穿透编排、复权计算、财报合并、交易日工具
-└── errors.py         # 领域异常 → HTTP 状态码
-fetcher/              # Celery 任务体系（嵌入式 worker + beat，API 进程内 solo pool 串行执行）
-├── app.py            # Celery 实例 + beat 调度表
-├── worker.py         # 嵌入式 worker + beat 启动（daemon thread）
-├── tasks.py          # 抓取任务（查询 → 解析 → upsert → 水位更新）
-├── beat.py           # 定时同步任务
-└── providers/        # Baostock 查询函数
-db/
-├── models/           # SQLAlchemy 2.0 模型（17 张表）
-├── coverage.py       # 覆盖度/新鲜度规则
-└── alembic/          # schema 迁移
-core/                 # 代码标准化等纯逻辑
-deploy/               # systemd 单元（api）
+fetch_service/        # HTTP 入口(app) + Redis job 存储(jobs) + 串行 worker(worker)
+fetcher/providers/    # baostock provider（query_* + 限流 + 登录/重连）
+core/ratelimit.py     # 滑动窗口限流（memory / redis 两实现）
+settings.py           # 配置（pydantic-settings）
 ```
-
-## 运维
-
-- **分钟线分区**：`kline_minute` 按年分区，已预建至 2027 + DEFAULT 兜底，
-  每年在 Alembic 中追加下一年分区。
-- **任务观测**：`fetch_task` 表记录每次抓取的参数、状态与错误。
-- 旧 MCP 实现保留在 git tag `pre-restructure`。
