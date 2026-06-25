@@ -33,6 +33,10 @@ builder.Services.AddSingleton<StockData.Mcp.Data.DividendReadService>();
 builder.Services.AddSingleton<StockData.Mcp.Data.MacroReadService>();
 builder.Services.AddSingleton<StockData.Mcp.Data.FinancialReadService>();
 builder.Services.AddSingleton<StockData.Mcp.Data.TradingDaysReadService>();
+builder.Services.AddSingleton<StockData.Mcp.Data.SnapshotReadService>();
+builder.Services.AddSingleton<StockData.Mcp.Data.AdjustFactorReadService>();
+builder.Services.AddSingleton(TimeProvider.System);   // StockAnalysisService 依赖（始终注册）
+builder.Services.AddSingleton<StockData.Mcp.Data.StockAnalysisService>();
 if (builder.Configuration.GetValue<bool>("StockData:PipelineEnabled"))
     builder.Services.AddStockDataPipeline(builder.Configuration);
 

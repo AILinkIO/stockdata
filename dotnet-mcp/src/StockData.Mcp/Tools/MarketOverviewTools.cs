@@ -28,21 +28,25 @@ public static class MarketOverviewTools
             new() { ["start_date"] = start, ["end_date"] = end }, ct), limit);
     }
 
+    // 基础股票列表（管线开→dotnet 快照；关→旧 REST）。派生工具(search/suspensions)复用其 JSON 过滤。
+    private static Task<string> StockListBase(StockDataApiClient api, SnapshotReadService snap, string? date, CancellationToken ct)
+        => snap.Enabled
+            ? snap.StockListJsonAsync(date is not null && DateOnly.TryParse(date, out var d) ? d : null, ct)
+            : api.GetAsync("/api/v1/market/stocks", new() { ["snap_date"] = date }, ct);
+
     [McpServerTool(Name = "get_all_stock")]
     [Description("获取全部股票（含指数）列表及交易状态。缺省最新交易日快照。")]
-    public static async Task<string> GetAllStock(StockDataApiClient api,
+    public static async Task<string> GetAllStock(StockDataApiClient api, SnapshotReadService snap,
         string? date = null, int limit = 250, CancellationToken ct = default)
-        => JsonHelper.Truncate(await api.GetAsync("/api/v1/market/stocks",
-            new() { ["snap_date"] = date }, ct), limit);
+        => JsonHelper.Truncate(await StockListBase(api, snap, date, ct), limit);
 
     [McpServerTool(Name = "search_stocks")]
     [Description("按代码或名称关键字搜索股票。")]
-    public static async Task<string> SearchStocks(StockDataApiClient api,
+    public static async Task<string> SearchStocks(StockDataApiClient api, SnapshotReadService snap,
         [Description("关键字（代码或名称子串）")] string keyword,
         string? date = null, int limit = 50, CancellationToken ct = default)
     {
-        var json = await api.GetAsync("/api/v1/market/stocks",
-            new() { ["snap_date"] = date }, ct);
+        var json = await StockListBase(api, snap, date, ct);
         var kw = keyword.Trim();
         return JsonHelper.FilterArray(json,
             el => (el.Str("code") ?? "").Contains(kw, StringComparison.OrdinalIgnoreCase)
@@ -52,11 +56,10 @@ public static class MarketOverviewTools
 
     [McpServerTool(Name = "get_suspensions")]
     [Description("获取停牌股票列表。")]
-    public static async Task<string> GetSuspensions(StockDataApiClient api,
+    public static async Task<string> GetSuspensions(StockDataApiClient api, SnapshotReadService snap,
         string? date = null, int limit = 250, CancellationToken ct = default)
     {
-        var json = await api.GetAsync("/api/v1/market/stocks",
-            new() { ["snap_date"] = date }, ct);
+        var json = await StockListBase(api, snap, date, ct);
         return JsonHelper.FilterArray(json,
             el => el.TryGetProperty("trade_status", out var v)
                   && v.ValueKind == System.Text.Json.JsonValueKind.False,

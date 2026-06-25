@@ -83,20 +83,25 @@ public static class MarketDataTools
 
     [McpServerTool(Name = "get_adjust_factor_data")]
     [Description("获取复权因子数据（每个除权除息事件一行，含前/后复权因子）。")]
-    public static async Task<string> GetAdjustFactorData(StockDataApiClient api,
+    public static async Task<string> GetAdjustFactorData(StockDataApiClient api, AdjustFactorReadService adj,
         [Description("股票代码")] string code,
         [Description("起始日期 YYYY-MM-DD")] string start_date,
         [Description("结束日期 YYYY-MM-DD")] string end_date,
         int limit = 250, CancellationToken ct = default)
-        => JsonHelper.Truncate(await api.GetAsync($"/api/v1/stocks/{code}/adjust-factors",
+    {
+        if (adj.Enabled && DateOnly.TryParse(start_date, out var s) && DateOnly.TryParse(end_date, out var e))
+            return JsonHelper.Truncate(await adj.GetJsonAsync(CodeNormalizer.ToBaostock(code), s, e, ct), limit);
+        return JsonHelper.Truncate(await api.GetAsync($"/api/v1/stocks/{code}/adjust-factors",
             new() { ["start_date"] = start_date, ["end_date"] = end_date }, ct), limit);
+    }
 
     [McpServerTool(Name = "get_stock_analysis")]
     [Description("生成个股分析报告（Markdown）。analysis_type: fundamental基本面/technical技术面/comprehensive综合。")]
-    public static Task<string> GetStockAnalysis(StockDataApiClient api,
+    public static Task<string> GetStockAnalysis(StockDataApiClient api, StockAnalysisService analysis,
         [Description("股票代码")] string code,
         [Description("fundamental/technical/comprehensive")] string analysis_type = "comprehensive",
         CancellationToken ct = default)
-        => api.GetAsync($"/api/v1/stocks/{code}/analysis",
-            new() { ["analysis_type"] = analysis_type }, ct);
+        => analysis.Enabled
+            ? analysis.BuildAsync(code, analysis_type, ct)
+            : api.GetAsync($"/api/v1/stocks/{code}/analysis", new() { ["analysis_type"] = analysis_type }, ct);
 }
