@@ -29,7 +29,7 @@ public class KlineServiceTests
             // 回一行业务日期 = 切片末，使 MaxDate 有值（编排不关心内容，writer 是 fake）
             var payload = new FetchPayload(
                 new[] { "date" },
-                new IReadOnlyList<string?>[] { new string?[] { request.EndDate.ToString("yyyy-MM-dd") } });
+                new IReadOnlyList<string?>[] { new string?[] { request.EndDate!.Value.ToString("yyyy-MM-dd") } });
             return Task.FromResult(payload);
         }
     }
@@ -92,7 +92,7 @@ public class KlineServiceTests
             Assert.Equal(fetch.Calls[i].StartDate, writer.Calls[i].Start);
             Assert.Equal(fetch.Calls[i].EndDate, writer.Calls[i].End);
             Assert.Equal("k_d", writer.Calls[i].DataType);
-            if (i > 0) Assert.Equal(fetch.Calls[i - 1].EndDate.AddDays(1), fetch.Calls[i].StartDate);
+            if (i > 0) Assert.Equal(fetch.Calls[i - 1].EndDate!.Value.AddDays(1), fetch.Calls[i].StartDate);
         }
     }
 

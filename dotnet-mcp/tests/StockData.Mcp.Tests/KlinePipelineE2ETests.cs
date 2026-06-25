@@ -24,7 +24,7 @@ public class KlinePipelineE2ETests
         public Task<FetchPayload> FetchAsync(FetchRequest r, CancellationToken ct = default)
         {
             Calls.Add(r);
-            var dates = new[] { r.StartDate, r.EndDate }.Distinct().OrderBy(d => d);
+            var dates = new[] { r.StartDate!.Value, r.EndDate!.Value }.Distinct().OrderBy(d => d);
             var rows = dates
                 .Select(d => (IReadOnlyList<string?>)new string?[] { d.ToString("yyyy-MM-dd"), "10.00", "10.50", "1000" })
                 .ToList();

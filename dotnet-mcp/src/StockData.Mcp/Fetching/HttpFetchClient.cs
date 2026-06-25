@@ -29,17 +29,8 @@ public sealed class HttpFetchClient(HttpClient http, FetchClientOptions options,
 
     public async Task<FetchPayload> FetchAsync(FetchRequest request, CancellationToken ct = default)
     {
-        var submit = await http.PostAsJsonAsync("/fetch", new
-        {
-            type = "fetch_kline",
-            @params = new
-            {
-                code = request.Code,
-                start_date = request.StartDate.ToString("yyyy-MM-dd"),
-                end_date = request.EndDate.ToString("yyyy-MM-dd"),
-                frequency = request.Frequency,
-            },
-        }, Json, ct);
+        var submit = await http.PostAsJsonAsync("/fetch",
+            new { type = request.Type, @params = request.ToParams() }, Json, ct);
         submit.EnsureSuccessStatusCode();
         var job = await submit.Content.ReadFromJsonAsync<FetchSubmitResponse>(Json, ct)
                   ?? throw new FetchFailedException("POST /fetch 返回空");

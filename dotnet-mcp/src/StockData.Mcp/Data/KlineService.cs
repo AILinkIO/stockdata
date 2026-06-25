@@ -40,7 +40,8 @@ public sealed class KlineService(IWatermarkStore watermarks, IFetchClient fetch,
         foreach (var (fs, fe) in decision.FetchRanges)
         foreach (var (ss, se) in RangeSlicer.Slice(fs, fe, maxDays))
         {
-            var payload = await fetch.FetchAsync(new FetchRequest(code, ss, se, frequency), ct);
+            var payload = await fetch.FetchAsync(
+                new FetchRequest("fetch_kline", StartDate: ss, EndDate: se, Code: code, Frequency: frequency), ct);
             await writer.PersistAsync(code, frequency, dataType, payload, ss, se, now, ct);
         }
     }
