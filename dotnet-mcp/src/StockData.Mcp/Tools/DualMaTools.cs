@@ -44,6 +44,7 @@ public static class DualMaTools
     public static async Task<string> GetDualMa(
         StockDataApiClient api,
         IMemoryCache cache,
+        StockData.Mcp.Data.KlineReadService pipeline,
         [Description("股票代码，如 sh.600000")] string code,
         [Description("起始日期 YYYY-MM-DD")] string start_date,
         [Description("结束日期 YYYY-MM-DD")] string end_date,
@@ -62,7 +63,7 @@ public static class DualMaTools
 
         // +1：交叉检测需要 start_date 前一根 K 线的有效均线值
         var lookback = TalibComputer.EmaLookback(slow_period) + 1;
-        var (k, err) = await KlineLoader.LoadAsync(api, cache, code,
+        var (k, err) = await KlineLoader.LoadAsync(api, pipeline, cache, code,
             start_date, end_date, lookback, adjust_flag, frequency, ct);
         if (k is null) return err!;
 

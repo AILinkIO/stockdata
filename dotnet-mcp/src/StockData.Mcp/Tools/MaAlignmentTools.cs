@@ -48,6 +48,7 @@ public static class MaAlignmentTools
     public static async Task<string> GetMaAlignment(
         StockDataApiClient api,
         IMemoryCache cache,
+        StockData.Mcp.Data.KlineReadService pipeline,
         [Description("股票代码，如 sh.600000")] string code,
         [Description("起始日期 YYYY-MM-DD")] string start_date,
         [Description("结束日期 YYYY-MM-DD")] string end_date,
@@ -72,7 +73,7 @@ public static class MaAlignmentTools
 
         // +1：signal 检测需要 start_date 前一根 K 线的有效 MA 值
         var lookback = TalibComputer.SmaLookback(periods[^1]) + 1;
-        var (k, err) = await KlineLoader.LoadAsync(api, cache, code,
+        var (k, err) = await KlineLoader.LoadAsync(api, pipeline, cache, code,
             start_date, end_date, lookback, adjust_flag, frequency, ct);
         if (k is null) return err!;
 

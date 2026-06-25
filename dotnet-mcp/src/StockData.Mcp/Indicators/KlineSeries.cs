@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.Extensions.Caching.Memory;
+using StockData.Mcp.Data;
 using StockData.Mcp.StockDataClient;
 
 namespace StockData.Mcp.Indicators;
@@ -56,7 +57,7 @@ public static class KlineLoader
     };
 
     public static async Task<(KlineSeries? Series, string? Error)> LoadAsync(
-        StockDataApiClient api, IMemoryCache cache,
+        StockDataApiClient api, KlineReadService pipeline, IMemoryCache cache,
         string code, string startDate, string endDate,
         int extraBars, string adjustFlag, string frequency, CancellationToken ct)
     {
@@ -71,9 +72,14 @@ public static class KlineLoader
         var key = $"kline:{code}:{frequency}:{extStart}:{endDate}:{adjustFlag}";
         if (cache.TryGetValue(key, out KlineSeries? hit)) return (hit, null);
 
-        var json = await api.GetAsync($"/api/v1/stocks/{code}/kline",
-            new() { ["start_date"] = extStart, ["end_date"] = endDate,
-                    ["frequency"] = frequency, ["adjust_flag"] = adjustFlag }, ct);
+        // 管线开启 → dotnet 直读 PG（GetHistoricalJsonAsync 返回与旧 API 同形状 JSON）；关→旧 REST
+        string json;
+        if (pipeline.Enabled && DateOnly.TryParse(extStart, out var s) && DateOnly.TryParse(endDate, out var e))
+            json = await pipeline.GetHistoricalJsonAsync(CodeNormalizer.ToBaostock(code), frequency, s, e, adjustFlag, ct);
+        else
+            json = await api.GetAsync($"/api/v1/stocks/{code}/kline",
+                new() { ["start_date"] = extStart, ["end_date"] = endDate,
+                        ["frequency"] = frequency, ["adjust_flag"] = adjustFlag }, ct);
 
         if (json.StartsWith("Error:")) return (null, json);
 

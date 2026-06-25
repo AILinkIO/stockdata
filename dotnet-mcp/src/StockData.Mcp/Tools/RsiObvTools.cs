@@ -27,6 +27,7 @@ public static class RsiObvTools
     public static async Task<string> GetRsi(
         StockDataApiClient api,
         IMemoryCache cache,
+        StockData.Mcp.Data.KlineReadService pipeline,
         [Description("股票代码，如 sh.600000")] string code,
         [Description("起始日期 YYYY-MM-DD")] string start_date,
         [Description("结束日期 YYYY-MM-DD")] string end_date,
@@ -40,7 +41,7 @@ public static class RsiObvTools
         if (period is < 2 or > 200) return "Error: period 须在 2-200 之间";
 
         var lookback = TalibComputer.RsiLookback(period);
-        var (k, err) = await KlineLoader.LoadAsync(api, cache, code,
+        var (k, err) = await KlineLoader.LoadAsync(api, pipeline, cache, code,
             start_date, end_date, lookback, adjust_flag, frequency, ct);
         if (k is null) return err!;
 
@@ -77,6 +78,7 @@ public static class RsiObvTools
     public static async Task<string> GetObv(
         StockDataApiClient api,
         IMemoryCache cache,
+        StockData.Mcp.Data.KlineReadService pipeline,
         [Description("股票代码，如 sh.600000")] string code,
         [Description("起始日期 YYYY-MM-DD")] string start_date,
         [Description("结束日期 YYYY-MM-DD")] string end_date,
@@ -87,7 +89,7 @@ public static class RsiObvTools
         CancellationToken ct = default)
     {
         // OBV 无需预热 bar（lookback=0），但为确保起始基准一致，向前多取 5 根
-        var (k, err) = await KlineLoader.LoadAsync(api, cache, code,
+        var (k, err) = await KlineLoader.LoadAsync(api, pipeline, cache, code,
             start_date, end_date, 5, adjust_flag, frequency, ct);
         if (k is null) return err!;
 
@@ -132,6 +134,7 @@ public static class RsiObvTools
     public static async Task<string> GetCci(
         StockDataApiClient api,
         IMemoryCache cache,
+        StockData.Mcp.Data.KlineReadService pipeline,
         [Description("股票代码，如 sh.600000")] string code,
         [Description("起始日期 YYYY-MM-DD")] string start_date,
         [Description("结束日期 YYYY-MM-DD")] string end_date,
@@ -142,7 +145,7 @@ public static class RsiObvTools
         CancellationToken ct = default)
     {
         var lookback = TalibComputer.CciLookback(CciSlow); // 慢线决定所需预热 bar 数
-        var (k, err) = await KlineLoader.LoadAsync(api, cache, code,
+        var (k, err) = await KlineLoader.LoadAsync(api, pipeline, cache, code,
             start_date, end_date, lookback, adjust_flag, frequency, ct);
         if (k is null) return err!;
 
