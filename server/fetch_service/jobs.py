@@ -27,8 +27,8 @@ _PENDING_KEY = "fetch:pending"
 
 
 def _job_redis_url() -> str:
-    # 私有 job 存储，默认独立 DB5，避免与 celery broker(db2)/result(db3)/限流(db4) 冲突
-    return os.getenv("STOCKDATA_FETCH_JOB_REDIS_URL", "redis://127.0.0.1:6379/5")
+    # 私有 job 存储，默认独立 DB2（限流用 db1），避免相互冲突
+    return os.getenv("STOCKDATA_FETCH_JOB_REDIS_URL", "redis://127.0.0.1:6379/2")
 
 
 def params_hash(task_type: str, params: dict) -> str:

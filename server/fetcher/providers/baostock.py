@@ -44,7 +44,7 @@ _BS_LOCK = threading.RLock()
 _RATE_LIMITER = create_rate_limiter(
     max_calls=settings.fetch_rate_limit_per_minute,
     backend=settings.rate_limit_backend,
-    redis_url=settings.rate_limit_redis_url or settings.broker_url,
+    redis_url=settings.rate_limit_redis_url,
     key="ratelimit:baostock",
 )
 
