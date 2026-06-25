@@ -109,19 +109,13 @@ def _run_job(store: JobStore, job_id: str, stop: threading.Event) -> None:
             store.set_halted(str(e))
             return
         except WatchdogTimeout as e:
+            logger.error(
+                "baostock 查询超时（watchdog %ds），暂停抓取（待 /restart 恢复）: %s",
+                settings.fetch_watchdog_timeout_seconds, e,
+            )
             provider.reset_login_state()
-            if attempt < settings.fetch_max_retries:
-                wait = _backoff_seconds(attempt)
-                logger.warning(
-                    "baostock 查询超时（watchdog %ds），重置连接，%ds 后重试: %s",
-                    settings.fetch_watchdog_timeout_seconds, wait, e,
-                )
-                store.mark_running(job_id)
-                if stop.wait(wait):
-                    return
-                continue
-            store.mark_failed(
-                job_id, f"抓取超时（watchdog {settings.fetch_watchdog_timeout_seconds}s，重试耗尽）")
+            store.mark_failed(job_id, f"抓取超时（watchdog {settings.fetch_watchdog_timeout_seconds}s）")
+            store.set_halted(f"watchdog 超时（{settings.fetch_watchdog_timeout_seconds}s）: {e}")
             return
         except DataSourceError as e:
             if attempt < settings.fetch_max_retries:
