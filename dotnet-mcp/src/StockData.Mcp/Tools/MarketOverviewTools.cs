@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using ModelContextProtocol.Server;
+using StockData.Mcp.Data;
 using StockData.Mcp.StockDataClient;
 
 namespace StockData.Mcp.Tools;
@@ -11,12 +12,18 @@ public static class MarketOverviewTools
     [McpServerTool(Name = "get_trade_dates")]
     [Description("获取交易日历（每天标注是否交易日）。缺省返回最近 90 天。")]
     public static async Task<string> GetTradeDates(StockDataApiClient api,
+        TradeCalendarReadService calendar,
         string? start_date = null, string? end_date = null, int limit = 250,
         CancellationToken ct = default)
     {
         var end = end_date ?? DateTime.Today.ToString("yyyy-MM-dd");
         var start = start_date
             ?? DateTime.Parse(end).AddDays(-90).ToString("yyyy-MM-dd");
+
+        // 管线开启 → dotnet（EnsureRange + 直读 PG）；否则回退旧 Python REST。
+        if (calendar.Enabled && DateOnly.TryParse(start, out var s) && DateOnly.TryParse(end, out var e))
+            return JsonHelper.Truncate(await calendar.GetJsonAsync(s, e, ct), limit);
+
         return JsonHelper.Truncate(await api.GetAsync("/api/v1/market/trade-calendar",
             new() { ["start_date"] = start, ["end_date"] = end }, ct), limit);
     }

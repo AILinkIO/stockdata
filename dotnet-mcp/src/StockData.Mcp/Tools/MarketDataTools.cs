@@ -14,6 +14,7 @@ public static class MarketDataTools
     public static async Task<string> GetHistoricalKData(
         StockDataApiClient api,
         KlineReadService pipeline,
+        KlineMinuteReadService minutePipeline,
         [Description("股票代码，如 sh.600000")] string code,
         [Description("起始日期 YYYY-MM-DD")] string start_date,
         [Description("结束日期 YYYY-MM-DD")] string end_date,
@@ -24,13 +25,21 @@ public static class MarketDataTools
     {
         var isMinute = frequency is "5" or "15" or "30" or "60";
 
-        // 管线开启 + d/w/m 不复权：走 dotnet（EnsureRange + 直读 PG）。
-        // 分钟线 / 复权（adjust_flag 1/2）尚未迁移，仍回退旧 Python REST。
-        if (pipeline.Enabled && !isMinute && adjust_flag == "3"
+        // 管线开启 + d/w/m（含复权 1/2，读时乘因子）：走 dotnet。
+        if (pipeline.Enabled && !isMinute
             && DateOnly.TryParse(start_date, out var s) && DateOnly.TryParse(end_date, out var e))
         {
             var norm = CodeNormalizer.ToBaostock(code);
-            return JsonHelper.Truncate(await pipeline.GetHistoricalJsonAsync(norm, frequency, s, e, ct), limit);
+            return JsonHelper.Truncate(await pipeline.GetHistoricalJsonAsync(norm, frequency, s, e, adjust_flag, ct), limit);
+        }
+
+        // 管线开启 + 分钟线（不复权）：走 dotnet（落 kline_minute）。
+        if (minutePipeline.Enabled && isMinute
+            && DateOnly.TryParse(start_date, out var ms) && DateOnly.TryParse(end_date, out var me))
+        {
+            var norm = CodeNormalizer.ToBaostock(code);
+            return JsonHelper.Truncate(
+                await minutePipeline.GetJsonAsync(norm, short.Parse(frequency), ms, me, ct), limit);
         }
 
         var path = isMinute
@@ -49,18 +58,28 @@ public static class MarketDataTools
     [McpServerTool(Name = "get_stock_basic_info")]
     [Description("获取股票基本信息（名称、上市/退市日期、类型、状态）。")]
     public static Task<string> GetStockBasicInfo(StockDataApiClient api,
+        StockBasicReadService basic,
         [Description("股票代码")] string code, CancellationToken ct = default)
-        => api.GetAsync($"/api/v1/stocks/{code}/basic", ct: ct);
+        => basic.Enabled
+            ? basic.GetJsonAsync(CodeNormalizer.ToBaostock(code), ct)
+            : api.GetAsync($"/api/v1/stocks/{code}/basic", ct: ct);
 
     [McpServerTool(Name = "get_dividend_data")]
     [Description("获取分红送转数据。year_type: report预案公告年份/operate除权除息年份。")]
     public static async Task<string> GetDividendData(StockDataApiClient api,
+        DividendReadService dividend,
         [Description("股票代码")] string code,
         [Description("年份，如 2023")] string year,
         [Description("report/operate")] string year_type = "report",
         int limit = 250, CancellationToken ct = default)
-        => JsonHelper.Truncate(await api.GetAsync($"/api/v1/stocks/{code}/dividends",
+    {
+        if (dividend.Enabled && int.TryParse(year, out var y))
+            return JsonHelper.Truncate(
+                await dividend.GetJsonAsync(CodeNormalizer.ToBaostock(code), y, year_type, ct), limit);
+
+        return JsonHelper.Truncate(await api.GetAsync($"/api/v1/stocks/{code}/dividends",
             new() { ["year"] = year, ["year_type"] = year_type }, ct), limit);
+    }
 
     [McpServerTool(Name = "get_adjust_factor_data")]
     [Description("获取复权因子数据（每个除权除息事件一行，含前/后复权因子）。")]
