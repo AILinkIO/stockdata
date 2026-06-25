@@ -27,6 +27,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<TradeCalendarService>();
         services.AddScoped<SnapshotService>();
         services.AddScoped<IAdjustFactorWriter, AdjustFactorWriter>();
+        services.AddScoped<IAdjustFactorSignalQuery, EfAdjustFactorSignalQuery>();
         services.AddScoped<AdjustFactorService>();
         services.AddScoped<IDividendWriter, DividendWriter>();
         services.AddScoped<DividendService>();

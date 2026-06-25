@@ -289,4 +289,74 @@ public class CoverageTests
         Assert.True(Coverage.CheckRange(w, "k_d", D(2026, 6, 1), D(2099, 1, 31), NOW).Fresh);
         Assert.True(Coverage.CheckRange(w, "k_d", D(2099, 1, 1), D(2099, 1, 31), NOW).Fresh);
     }
+
+    // ── 复权因子事件驱动刷新（CheckAdjustFactor）──
+
+    private static readonly DateOnly AF_EPOCH = new(1990, 12, 19);
+
+    [Fact]
+    public void test_adjust_factor_first_touch_full_backfill()
+    {
+        // 首次触达：afWm=null → 恒从 1990-12-19 抓到 today
+        var d = Coverage.CheckAdjustFactor(afWm: null, afMaxEvent: null, divMaxEvent: null, NOW);
+        Assert.False(d.Fresh);
+        Assert.Equal(Ranges((AF_EPOCH, TODAY)), d.FetchRanges);
+    }
+
+    [Fact]
+    public void test_adjust_factor_new_dividend_event_triggers_refetch()
+    {
+        // 新除权：divMaxEvent (7/1) > afMaxEvent (6/1) → 整段重抓
+        var wm = Wm(D(1990, 12, 19), D(2026, 6, 11), fetchedAgoSeconds: 60);
+        var d = Coverage.CheckAdjustFactor(wm, D(2026, 6, 1), D(2026, 7, 1), NOW);
+        Assert.False(d.Fresh);
+        Assert.Equal(Ranges((AF_EPOCH, TODAY)), d.FetchRanges);
+    }
+
+    [Fact]
+    public void test_adjust_factor_af_max_null_but_div_has_event_triggers_refetch()
+    {
+        // adjust_factor 从未抓到事件，dividend 有事件 → stale
+        var wm = Wm(D(1990, 12, 19), D(2026, 6, 11), fetchedAgoSeconds: 60);
+        var d = Coverage.CheckAdjustFactor(wm, afMaxEvent: null, divMaxEvent: D(2026, 6, 1), NOW);
+        Assert.False(d.Fresh);
+        Assert.Equal(Ranges((AF_EPOCH, TODAY)), d.FetchRanges);
+    }
+
+    [Fact]
+    public void test_adjust_factor_no_new_event_is_fresh()
+    {
+        // dividend 事件已反映在 adjust_factor（divMax == afMax）→ fresh
+        var wm = Wm(D(1990, 12, 19), D(2026, 6, 11), fetchedAgoSeconds: 60);
+        var d = Coverage.CheckAdjustFactor(wm, D(2026, 6, 1), D(2026, 6, 1), NOW);
+        Assert.True(d.Fresh);
+    }
+
+    [Fact]
+    public void test_adjust_factor_div_max_before_af_max_is_fresh()
+    {
+        // dividend 旧事件 < adjust_factor 最新事件（极端：因子表已超前）→ fresh
+        var wm = Wm(D(1990, 12, 19), D(2026, 6, 11), fetchedAgoSeconds: 60);
+        var d = Coverage.CheckAdjustFactor(wm, D(2026, 6, 1), D(2026, 5, 1), NOW);
+        Assert.True(d.Fresh);
+    }
+
+    [Fact]
+    public void test_adjust_factor_no_dividend_yet_fresh_within_weekly()
+    {
+        // dividend 表无信号 + 水位 < Weekly → fresh（避免每 5 分钟重抓）
+        var wm = Wm(D(1990, 12, 19), D(2026, 6, 11), fetchedAgoSeconds: 60);
+        var d = Coverage.CheckAdjustFactor(wm, afMaxEvent: null, divMaxEvent: null, NOW);
+        Assert.True(d.Fresh);
+    }
+
+    [Fact]
+    public void test_adjust_factor_no_dividend_weekly_fallback_refetches()
+    {
+        // dividend 表无信号 + 水位超 Weekly → 兜底整段重抓一次
+        var wm = Wm(D(1990, 12, 19), D(2026, 6, 11), fetchedAgoSeconds: 8 * 86400L);
+        var d = Coverage.CheckAdjustFactor(wm, afMaxEvent: null, divMaxEvent: null, NOW);
+        Assert.False(d.Fresh);
+        Assert.Equal(Ranges((AF_EPOCH, TODAY)), d.FetchRanges);
+    }
 }

@@ -20,7 +20,8 @@ public static class Coverage
     {
         ["k_d"] = Realtime, ["k_w"] = Realtime, ["k_m"] = Realtime,
         ["k_5"] = Realtime, ["k_15"] = Realtime, ["k_30"] = Realtime, ["k_60"] = Realtime,
-        ["adjust_factor"] = Realtime,
+        // adjust_factor 故意不在此：事件驱动刷新（CheckAdjustFactor），
+        // 时间阈值档会每 5 分钟全量重抓 1990 起的整段因子。
         ["stock_basic"] = Daily,
         ["dividend"] = Daily,
         ["profit"] = Daily, ["operation"] = Daily, ["growth"] = Daily,
@@ -204,6 +205,35 @@ public static class Coverage
         if (snapDate < today) return Decision.Covered("历史快照永久有效");
         if (wm is null || IsStale(wm, dataType, now)) return new Decision(snapRange, "今日快照过期");
         return Decision.Covered("今日快照仍新鲜");
+    }
+
+    /// <summary>
+    /// 复权因子的事件驱动判定。复权因子只在除权除息事件（分红送转/配股）发生时变化，
+    /// 一只股票一年 1-3 次；按时间阈值刷新会浪费 baostock 整段（1990-至今）额度。
+    ///
+    /// 主判据：dividend 表 MAX(operate_date) > adjust_factor 表 MAX(divid_operate_date) 时
+    /// 视为有新除权事件，整段重抓因子（fore 序列随新事件全表重算，无法分段）。
+    /// 兜底：dividend 表无信号时，超 Weekly 仍未核实则整段重抓一次，防止异常漏抓。
+    /// 抓取区间恒为 <c>[BackfillStart, today]</c>，end 钳到 today。
+    /// </summary>
+    /// <param name="afWm">adjust_factor 水位（无 → 首次触达）。</param>
+    /// <param name="afMaxEvent">adjust_factor 表 MAX(divid_operate_date)（无事件时为 null）。</param>
+    /// <param name="divMaxEvent">dividend 表 MAX(operate_date) WHERE operate_date IS NOT NULL。</param>
+    /// <param name="now">调用方注入的"现在"。</param>
+    public static Decision CheckAdjustFactor(Watermark? afWm, DateOnly? afMaxEvent, DateOnly? divMaxEvent, DateTimeOffset now)
+    {
+        var today = CstDate(now);
+        var fullRange = new[] { (BackfillStart("adjust_factor"), today) };
+
+        if (afWm is null) return new Decision(fullRange, "首次触达，全量回填");
+
+        if (divMaxEvent is DateOnly dme && (afMaxEvent is null || dme > afMaxEvent))
+            return new Decision(fullRange, "检测到新除权事件，重抓复权因子");
+
+        if (divMaxEvent is null && (now - afWm.LastFetchedAt).TotalSeconds > Weekly)
+            return new Decision(fullRange, "dividend 无信号兜底刷新");
+
+        return Decision.Covered("无新除权事件，复权因子仍新鲜");
     }
 
     /// <summary>合并相邻（≤1 天间隔）/重叠区间，减少任务数。</summary>

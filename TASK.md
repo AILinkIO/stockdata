@@ -41,7 +41,7 @@
 │ · 限流(db4)    │   不碰 PG               │ · coverage 校验(移植)       │
 │ · 退避重试      │                        │ · writer 解析+落盘(移植)    │
 │ · baostock 调用 │                        │ · 读穿透编排 + 等待          │
-│ · job 状态(Redis)│                       │ · beat 定时(移植)           │
+│ · job 状态(Redis)│                       │                            │
 └──────────────┘                        │ · MCP 工具直读 PG           │
         Redis(job+限流) ── Python 私有     │ · TA-Lib 指标(已在)         │
                           PG ◄── 仅 dotnet │                            │
@@ -75,7 +75,7 @@
   - 600s 内同 params 重请求复用缓存 payload；过后重抓（幂等，可接受）。
 - ✅ **D-D schema/迁移属主【已定：EF Core Migrations + 重建库】**：schema 属主 = EF Core
   Migrations，不再引独立迁移工具。**可直接摧毁旧库重建**：EF Core 全新建表，无 in-place
-  迁移、无双属主交接（R5 消除）。代价 = 旧缓存数据丢失，由读穿透/beat 按需从 baostock
+  迁移、无双属主交接（R5 消除）。代价 = 旧缓存数据丢失，由读穿透按需从 baostock
   重新回填——**一次性成本，必须走限流（§0），切忌反复 nuke+refetch**（见 R5）。
 
 ## 3. 迁移阶段（增量、可回退，不大爆炸）
@@ -225,11 +225,6 @@
     列名带数字（3month/m0/m1）snake_case 约定不可靠，需显式 [Column]，单独一轮。
   - ⬜ **分钟线**（k_5/15/30/60）：KlineMinute 表按 bar_time RANGE 分区，EF 迁移需自定义分区 DDL，
     单独处理（或先建普通表）。
-- ⬜ **P6 beat 移植到 dotnet** ⚠️ landmine
-  beat 现靠读 PG 决定调度（`_is_trading_day` 查日历、`sync_tracked_codes` 遍历水位），
-  PG 只在 dotnet 后**只能在 dotnet 跑**（Quartz.NET / Hangfire / BackgroundService+cron）。
-  4 个任务（日历 08:00 / 昨日列表 08:30 / 市场 17:00 / 已入库代码 17:10 + 交易日 gating）
-  整体移植，读 PG 决定 → 调 `POST /fetch`（复用去重）。
 - ✅ **P7 Python 瘦身（2026-06-25）**
   删 `api/`、`db/`、`fetcher/{tasks,app,beat,worker,writer}.py`、`core/{timeutil,helpers}.py`、`tests/`、`deploy/`、
   `alembic.ini`——Python 仅剩 11 文件（fetch_service + providers + core.ratelimit + settings）。pyproject 依赖
@@ -244,7 +239,7 @@
   删 `server/docs/`（本次迁移前那轮重构的过时文档，引用已删代码）；根 `README.md` 与 `server/README.md` 重写为
   新架构（dotnet 属主 + Python fetch 微服务，含「fetch 如何工作」）。配置变更随下次 fetch 重建生效，现网容器不受影响。
 - ⬜ **P8 切换与验证**
-  流量切到 dotnet 路径（红线 #3：切换瞬间只一套登录态）；验证全类型读穿透、定时同步、
+  流量切到 dotnet 路径（红线 #3：切换瞬间只一套登录态）；验证全类型读穿透、
   幂等重投；保留回退开关。
 
 ## 4. 风险与失效模式
@@ -261,6 +256,7 @@
 
 ## 5. 明确不做 / 暂不动
 
-- 旧数据不做迁移保留：可摧毁旧库由 EF Core 重建，数据靠读穿透/beat 重新回填（D-D）。
+- 旧数据不做迁移保留：可摧毁旧库由 EF Core 重建，数据靠读穿透重新回填（D-D）。
 - 不放松限流 / 不引入并发多会话抓 baostock（红线 #2/#3）。
 - provider 抽象不扩（当前仅 baostock 一个实现，interface 很轻，不算过度设计）。
+- 不做 beat 定时同步：旧 celery beat 不移植到 dotnet，所有数据靠读穿透按需抓取（Coverage 刷新阈值驱动）。

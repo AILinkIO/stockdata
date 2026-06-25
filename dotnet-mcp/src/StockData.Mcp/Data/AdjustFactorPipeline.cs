@@ -99,17 +99,46 @@ public sealed class AdjustFactorWriter(StockDataDbContext db) : IAdjustFactorWri
     }
 }
 
+/// <summary>复权因子刷新信号查询：取 adjust_factor / dividend 两表的最大事件日（解耦便于单测）。</summary>
+public interface IAdjustFactorSignalQuery
+{
+    Task<DateOnly?> GetAdjustFactorMaxEventAsync(string code, CancellationToken ct = default);
+    Task<DateOnly?> GetDividendMaxOperateDateAsync(string code, CancellationToken ct = default);
+}
+
+public sealed class EfAdjustFactorSignalQuery(StockDataDbContext db) : IAdjustFactorSignalQuery
+{
+    public Task<DateOnly?> GetAdjustFactorMaxEventAsync(string code, CancellationToken ct = default)
+        => db.AdjustFactors
+            .Where(a => a.Code == code)
+            .MaxAsync(a => (DateOnly?)a.DividOperateDate, ct);
+
+    public Task<DateOnly?> GetDividendMaxOperateDateAsync(string code, CancellationToken ct = default)
+        => db.Dividends
+            .Where(d => d.Code == code && d.OperateDate != null)
+            .MaxAsync(d => (DateOnly?)d.OperateDate, ct);
+}
+
 /// <summary>
 /// 复权因子编排。移植 fetch_adjust_factor：**恒从 A 股开市日整段抓取**（不取 coverage 的缺口区间，
 /// 因 fore 序列随新除权全表重算），coverage 仅用于判断是否需要重抓。
+/// 刷新判定由 dividend 除权事件驱动（<see cref="Coverage.CheckAdjustFactor"/>），避免每 5 分钟
+/// 全量重抓整段浪费 baostock 额度。
 /// </summary>
-public sealed class AdjustFactorService(IWatermarkStore watermarks, IFetchClient fetch, IAdjustFactorWriter writer)
+public sealed class AdjustFactorService(
+    IWatermarkStore watermarks,
+    IFetchClient fetch,
+    IAdjustFactorWriter writer,
+    IAdjustFactorSignalQuery signalQuery)
 {
     public async Task EnsureFullAsync(string code, DateOnly end, DateTimeOffset now, CancellationToken ct = default)
     {
         var epoch = Coverage.BackfillStart("adjust_factor");
         var wm = await watermarks.GetAsync(code, "adjust_factor", ct);
-        var decision = Coverage.CheckRange(wm?.ToWatermark(), "adjust_factor", epoch, end, now);
+        var afMaxEvent = await signalQuery.GetAdjustFactorMaxEventAsync(code, ct);
+        var divMaxEvent = await signalQuery.GetDividendMaxOperateDateAsync(code, ct);
+
+        var decision = Coverage.CheckAdjustFactor(wm?.ToWatermark(), afMaxEvent, divMaxEvent, now);
         if (decision.Fresh) return;
 
         var payload = await fetch.FetchAsync(

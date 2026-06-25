@@ -45,7 +45,9 @@ public class LiveDeployVerifyTests
         // 3. adjust_factor（恒全量；可能无除权，验证水位推进）
         await using (var db = new StockDataDbContext(opts))
         {
-            await new AdjustFactorService(new EfWatermarkStore(db), fetch, new AdjustFactorWriter(db))
+            await new AdjustFactorService(
+                    new EfWatermarkStore(db), fetch, new AdjustFactorWriter(db),
+                    new EfAdjustFactorSignalQuery(db))
                 .EnsureFullAsync(code, new DateOnly(2026, 6, 10), now);
             Assert.True(await db.DataWatermarks.AnyAsync(w => w.Code == code && w.DataType == "adjust_factor"));
         }

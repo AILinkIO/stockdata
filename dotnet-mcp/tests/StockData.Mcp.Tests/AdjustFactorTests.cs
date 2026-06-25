@@ -106,12 +106,22 @@ public class AdjustFactorServiceTests
             => Task.FromResult(wm);
     }
 
+    private sealed class FakeSignalQuery(DateOnly? afMax, DateOnly? divMax) : IAdjustFactorSignalQuery
+    {
+        public Task<DateOnly?> GetAdjustFactorMaxEventAsync(string code, CancellationToken ct = default)
+            => Task.FromResult(afMax);
+        public Task<DateOnly?> GetDividendMaxOperateDateAsync(string code, CancellationToken ct = default)
+            => Task.FromResult(divMax);
+    }
+
     [Fact]
     public async Task 首次触达_整段抓取_从1990到end()
     {
         var fetch = new FakeFetch();
         var writer = new FakeWriter();
-        var svc = new AdjustFactorService(new FakeWatermarks(null), fetch, writer);
+        var svc = new AdjustFactorService(
+            new FakeWatermarks(null), fetch, writer,
+            new FakeSignalQuery(afMax: null, divMax: null));
 
         await svc.EnsureFullAsync("sh.600000", D(2026, 6, 10), NOW);
 
@@ -126,17 +136,40 @@ public class AdjustFactorServiceTests
     [Fact]
     public async Task 已覆盖且新鲜_不抓()
     {
-        // adjust_factor 刷新间隔 300s：须新鲜(<5min)才不抓——因子盘中随新除权会变
+        // 无 dividend 信号 + 水位新鲜(<Weekly) → CheckAdjustFactor 返回 fresh，不抓。
         var wm = new DataWatermark
         {
             Code = "sh.600000", DataType = "adjust_factor",
             FirstDate = D(1990, 12, 19), LastDate = D(2026, 6, 11), LastFetchedAt = NOW.AddSeconds(-60),
         };
         var fetch = new FakeFetch();
-        var svc = new AdjustFactorService(new FakeWatermarks(wm), fetch, new FakeWriter());
+        var svc = new AdjustFactorService(
+            new FakeWatermarks(wm), fetch, new FakeWriter(),
+            new FakeSignalQuery(afMax: D(2026, 6, 11), divMax: null));
 
         await svc.EnsureFullAsync("sh.600000", D(2026, 6, 11), NOW);
 
         Assert.Empty(fetch.Calls);
+    }
+
+    [Fact]
+    public async Task 检测到新除权_整段重抓()
+    {
+        // dividend 出现新事件（7/1 除权）> adjust_factor 已知最大事件（6/1）→ 整段重抓。
+        var wm = new DataWatermark
+        {
+            Code = "sh.600000", DataType = "adjust_factor",
+            FirstDate = D(1990, 12, 19), LastDate = D(2026, 6, 11), LastFetchedAt = NOW.AddSeconds(-10),
+        };
+        var fetch = new FakeFetch();
+        var writer = new FakeWriter();
+        var svc = new AdjustFactorService(
+            new FakeWatermarks(wm), fetch, writer,
+            new FakeSignalQuery(afMax: D(2026, 6, 1), divMax: D(2026, 7, 1)));
+
+        await svc.EnsureFullAsync("sh.600000", D(2026, 6, 11), NOW);
+
+        Assert.Single(fetch.Calls);
+        Assert.Equal(D(1990, 12, 19), fetch.Calls[0].StartDate);   // 恒整段
     }
 }
