@@ -41,13 +41,42 @@ def _df_to_payload(df: pd.DataFrame | None) -> dict:
     return {"fields": fields, "rows": rows}
 
 
-def _query(task_type: str, params: dict) -> pd.DataFrame:
-    """按 type 分发到 provider 查询。当前 P4 只需 fetch_kline（日线/周/月线）。"""
+def _query(task_type: str, params: dict) -> dict:
+    """按 type 分发到 provider 查询，返回 payload {fields, rows}。
+
+    多数类型 provider 返回 DataFrame → _df_to_payload。财报季度类例外：query_fina_quarter
+    返回 {report_type: record} dict（非表格），编码为 fields=[report_type, record]、每行
+    [类型, json(记录)]，dotnet 侧拆解 record 提 stat_date/pub_date、其余进 metrics。
+    """
     if task_type == "fetch_kline":
-        return provider.query_k_data(
-            params["code"], params["start_date"], params["end_date"],
-            params.get("frequency", "d"),
-        )
+        return _df_to_payload(provider.query_k_data(
+            params["code"], params["start_date"], params["end_date"], params.get("frequency", "d")))
+    if task_type == "fetch_trade_calendar":
+        return _df_to_payload(provider.query_trade_dates(params["start_date"], params["end_date"]))
+    if task_type == "fetch_stock_basic":
+        return _df_to_payload(provider.query_stock_basic(params["code"]))
+    if task_type == "fetch_stock_list":
+        return _df_to_payload(provider.query_all_stock(params["snap_date"]))
+    if task_type == "fetch_industry":
+        return _df_to_payload(provider.query_industry(params["snap_date"]))
+    if task_type == "fetch_index_constituent":
+        return _df_to_payload(provider.query_index_constituent(params["index_code"], params["snap_date"]))
+    if task_type == "fetch_adjust_factor":
+        # 恒全量：dotnet 侧已传 start=A股开市日，整段抓取（fore 随新除权全表重算）
+        return _df_to_payload(provider.query_adjust_factor(params["code"], params["start_date"], params["end_date"]))
+    if task_type == "fetch_dividend":
+        return _df_to_payload(provider.query_dividend(params["code"], params["year"], params["year_type"]))
+    if task_type == "fetch_macro":
+        return _df_to_payload(provider.query_macro(params["kind"], params["start_date"], params["end_date"]))
+    if task_type == "fetch_performance":
+        # 业绩快报(express)/预告(forecast)：按 report_type 分发，表格
+        q = provider.query_performance_express if params["report_type"] == "express" else provider.query_forecast
+        return _df_to_payload(q(params["code"], params["start_date"], params["end_date"]))
+    if task_type == "fetch_financial_report":
+        import json
+        cats = provider.query_fina_quarter(params["code"], params["year"], int(params["quarter"]))
+        rows = [[rt, json.dumps(rec, default=str, ensure_ascii=False)] for rt, rec in cats.items()]
+        return {"fields": ["report_type", "record"], "rows": rows}
     raise ValueError(f"不支持的抓取类型: {task_type}")
 
 
@@ -60,8 +89,7 @@ def _run_job(store: JobStore, job_id: str) -> None:
     store.mark_running(job_id)
     for attempt in range(settings.fetch_max_retries + 1):
         try:
-            df = _query(task_type, params)
-            store.mark_done(job_id, _df_to_payload(df))
+            store.mark_done(job_id, _query(task_type, params))
             return
         except NoDataFoundError:
             # 合法空结果（停牌/未发布）：done 空 payload，dotnet 据 claimable_last 处理水位

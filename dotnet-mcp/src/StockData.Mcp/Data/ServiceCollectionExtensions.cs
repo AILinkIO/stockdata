@@ -21,6 +21,20 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IWatermarkStore, EfWatermarkStore>();
         services.AddScoped<IKlineWriter, KlineWriter>();
         services.AddScoped<KlineService>();
+        services.AddScoped<IKlineMinuteWriter, KlineMinuteWriter>();
+        services.AddScoped<KlineMinuteService>();
+        services.AddScoped<ITradeCalendarWriter, TradeCalendarWriter>();
+        services.AddScoped<TradeCalendarService>();
+        services.AddScoped<SnapshotService>();
+        services.AddScoped<IAdjustFactorWriter, AdjustFactorWriter>();
+        services.AddScoped<AdjustFactorService>();
+        services.AddScoped<IDividendWriter, DividendWriter>();
+        services.AddScoped<DividendService>();
+        services.AddScoped<IMacroWriter, MacroWriter>();
+        services.AddScoped<MacroService>();
+        services.AddScoped<IFinancialWriter, FinancialWriter>();
+        services.AddScoped<FinancialQuarterService>();
+        services.AddScoped<PerformanceService>();
         services.TryAddSingleton(TimeProvider.System);
 
         services.AddSingleton(new FetchClientOptions

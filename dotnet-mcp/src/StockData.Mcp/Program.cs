@@ -26,6 +26,13 @@ builder.Services.AddMemoryCache();
 // 关闭时工具不调用它、走旧 REST → 现网行为与今日完全一致。重服务（DbContext/KlineService/
 // HttpFetchClient）仅开启时注册。
 builder.Services.AddSingleton<StockData.Mcp.Data.KlineReadService>();
+builder.Services.AddSingleton<StockData.Mcp.Data.KlineMinuteReadService>();
+builder.Services.AddSingleton<StockData.Mcp.Data.TradeCalendarReadService>();
+builder.Services.AddSingleton<StockData.Mcp.Data.StockBasicReadService>();
+builder.Services.AddSingleton<StockData.Mcp.Data.DividendReadService>();
+builder.Services.AddSingleton<StockData.Mcp.Data.MacroReadService>();
+builder.Services.AddSingleton<StockData.Mcp.Data.FinancialReadService>();
+builder.Services.AddSingleton<StockData.Mcp.Data.TradingDaysReadService>();
 if (builder.Configuration.GetValue<bool>("StockData:PipelineEnabled"))
     builder.Services.AddStockDataPipeline(builder.Configuration);
 

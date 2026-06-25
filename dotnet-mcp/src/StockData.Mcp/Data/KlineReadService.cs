@@ -20,21 +20,32 @@ public sealed class KlineReadService(IServiceProvider root, IConfiguration confi
     public bool Enabled => config.GetValue<bool>("StockData:PipelineEnabled");
 
     public async Task<string> GetHistoricalJsonAsync(
-        string code, string frequency, DateOnly start, DateOnly end, CancellationToken ct = default)
+        string code, string frequency, DateOnly start, DateOnly end, string adjustFlag, CancellationToken ct = default)
     {
         await using var scope = root.CreateAsyncScope();
         var sp = scope.ServiceProvider;
         var db = sp.GetRequiredService<StockDataDbContext>();
         var svc = sp.GetRequiredService<KlineService>();
-        var time = sp.GetRequiredService<TimeProvider>();
+        var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
 
-        await svc.EnsureRangeAsync(code, $"k_{frequency}", start, end, time.GetUtcNow(), ct);
+        await svc.EnsureRangeAsync(code, $"k_{frequency}", start, end, now, ct);
 
         var rows = await db.Klines.AsNoTracking()
             .Where(k => k.Code == code && k.Frequency == frequency
                         && k.TradeDate >= start && k.TradeDate <= end)
             .OrderBy(k => k.TradeDate)
             .ToListAsync(ct);
+
+        // 复权（1 后复权 / 2 前复权）：确保完整因子序列 → 逐 bar 乘因子（不复权 3 直读原始）
+        if ((adjustFlag == "1" || adjustFlag == "2") && rows.Count > 0)
+        {
+            await sp.GetRequiredService<AdjustFactorService>().EnsureFullAsync(code, end, now, ct);
+            var factors = await db.AdjustFactors.AsNoTracking()
+                .Where(a => a.Code == code && a.DividOperateDate <= end)
+                .OrderBy(a => a.DividOperateDate)
+                .ToListAsync(ct);
+            AdjustCalc.Apply(rows, factors, adjustFlag);
+        }
 
         return Serialize(rows);
     }
