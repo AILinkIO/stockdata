@@ -124,12 +124,86 @@
     护栏拒绝库名 stockdata；默认跳过（需 `STOCKDATA_E2E_PG_DSN`）。脚本 `scripts/e2e-kline.sh`
     自动从 .env 推导独立库 `stockdata_e2e` 并预建。**已实跑通过**：2 行落库、close=10.5000 精确、
     水位 first=2020-01-01(LEAST)/last=2024-01-03(claimable)、重判 fresh 不再 fetch。普通套件 96/96。
-  - ⬜ **live baostock E2E（你来跑，谨慎）**：把 MCP `get_historical_k_data` 路由到 `KlineService`；
-    启 `fetch_service`（db5）；隔离库换真 fetch（`STOCKDATA_E2E_FETCH_URL`/启用管线指向 fetch_service）；
-    新 code 回填验证。**走限流、进程不频繁重启、重启间隔 >5min**（§0）。
-- ⬜ **P5 扩展其余数据类型**
-  `check_quarter`（财报披露截止日 + 负结果记忆）、`check_snapshot`（快照永久有效）、
-  K线其余频率、复权因子、宏观。每类沿用黄金对照。
+  - ✅ **live baostock E2E（已实跑通过，2026-06-25）**：正式切换主库 `stockdata`——
+    `DROP SCHEMA public` + EF `database update` 建 kline/data_watermark；compose 加 `fetch` 服务
+    （server 镜像跑 `uvicorn fetch_service.app`，:8090）+ mcp 开 `StockData__PipelineEnabled=true`
+    + PG DSN + FetchBase，`./up.sh fetch mcp`（不启旧 api/migrate）。`LiveKlinePullTests` 驱动
+    `KlineService.EnsureRange(sh.600000,k_d,...)` 首次触达全史回填：4 段切片 → fetch_service → baostock
+    →落盘。**结果**：6446 行(1999-11-10 实际上市日→2026-06-18)、水位 first=1990-12-19/last=2026-06-20、
+    decimal 精确、单次登录无重登风暴、两容器长驻 healthy。§0 达标。
+    遗留：MCP 工具的真正协议调用（serving 读路径）未走 MCP JSON-RPC 验证（用同一 KlineService 代码 +
+    序列化已单测，置信高）；非 k_d 工具因未启 api 失效（预期）。
+- 🔄 **P5 扩展其余数据类型**
+  - ✅ **schema 地基（8 表，2026-06-25）**：EF 实体 `AdjustFactor`/`Dividend`/`FinancialReport`/
+    `StockBasic`/`TradeCalendar`/`StockListSnapshot`/`IndexConstituent`/`StockIndustry`（覆盖 范围/
+    快照/季度财报/分红 四模式）+ snake_case 约定（`ToSnakeCase` 循环，避免逐列手写；对既有
+    kline/data_watermark 幂等）+ updated_at default now() 约定。迁移 `AddRemainingTables` 仅新增 8 表
+    （零 Alter，不碰既有表），**已 apply 到运行中的 stockdata**（kline 6446 行完好）。`dotnet test` 108/108。
+    coverage 判定（CheckQuarter/CheckSnapshot/CheckRange）P3 已移植且测试绿。
+  - 🔄 **数据管线（writer/parser/orchestration/读取/路由）**：按 k_d 样板逐类做。
+    - ✅ **trade_calendar 完整管线（代码+单测，2026-06-25）**：`FetchRequest` 泛化为 `{Type, 可选 Code/Frequency}`
+      支持无 code 类型；`TradeCalendarParser`（calendar_date+is_trading_day）+ `TradeCalendarWriter`
+      （ON CONFLICT + **水位 last=区间末，不用 claimable_last**，code=""）+ `TradeCalendarService`（coverage→
+      不切片→抓取→落盘）+ `TradeCalendarReadService`（EnsureRange+直读+序列化 [{calendar_date,is_trading_day}]）；
+      `get_trade_dates` 工具走开关路由；fetch_service worker 加 `fetch_trade_calendar`。`dotnet test` 113/113。
+      **未部署**（需重建 fetch 镜像=重启=新 bs.login，按 §0 待 David 在 >5min 间隔时决定）。
+    - ✅ **快照四件套数据管线（代码+单测，2026-06-25）**：`SnapshotService`（CheckSnapshot 点状编排）+
+      4 个 ingest（`StockBasicIngest` per-code+today / `StockListIngest` 空结果不写水位 / `IndustryIngest` /
+      `IndexConstituentIngest` data_type=index_{code}）+ 通用 `SnapshotSql`（分块 ON CONFLICT upsert + 水位 +
+      字段访问器）。`FetchRequest` 再泛化为命名可选字段 + `ToParams()`（支持 snap_date/index_code）。
+      fetch_service worker 加 4 类分发。**stock_basic 读+路由**（get_stock_basic_info，无日历依赖，单对象序列化，
+      中文 UTF-8 原样输出对齐 Starlette）。`dotnet test` 119/119。
+      遗留：stock_list/index/industry 的**读+路由**需 snap_date="最近交易日"解析（依赖 trade_calendar 数据 +
+      DateTools 派生逻辑迁移）；派生工具（search_stocks/get_suspensions/list_industries/get_industry_members）；
+      **未部署**（需重建 fetch=重启，§0）。
+    - ✅ **adjust_factor + 复权解锁（代码+单测，2026-06-25）**：`AdjustFactorParser` + `AdjustFactorWriter`
+      （整段 upsert + 水位，空结果也推进）+ `AdjustFactorService.EnsureFull`（**恒从 1990 整段抓取**，
+      coverage 仅判是否重抓）+ `AdjustCalc.Apply`（读时复权：bisect_right 找 ≤bar 的最近除权事件，
+      前复权 fore/后复权 back，首事件前因子 1，乘 OHLC+preclose）。`KlineReadService` 加 adjustFlag：
+      flag 1/2 → EnsureFull + 逐 bar 乘因子；`get_historical_k_data` 现 **d/w/m 全复权口径走 dotnet**
+      （不再限 flag=3）。fetch_service 加 fetch_adjust_factor。复权数学有黄金单测。`dotnet test` 125/125。**未部署**。
+    - ✅ **dividend（代码+单测，2026-06-25）**：`DividendParser`（典型列 + 其余字段进 detail JSONB，中文原样）+
+      `DividendWriter`（upsert + 水位 last=min(年末,今天)/first=年初，detail `::jsonb`）+ `DividendService.Ensure`
+      （CheckRange 按年判定）+ `DividendReadService`（detail 作嵌套 JSON `WriteRawValue` 输出）+ get_dividend_data 路由 +
+      fetch_service fetch_dividend。FetchRequest 加 Year/YearType。`dotnet test` 131/131。**未部署**。
+    - ✅ **财报+快报（CheckQuarter，代码+单测，2026-06-25）—— 最后一类**：两个设计关卡均解决：
+      ① **payload 非表格**：fetch_service worker `_query` 重构为返回 payload；财报编码为 fields=[report_type, record]、
+      每行 [类型, json(记录)]，`FinancialParser.ParseQuarterly` 拆 record 提 statDate/pubDate、其余进 metrics(JSONB)。
+      ② **last_success 负结果记忆**：用 data_watermark 合成 `data_type=fin:{year}q{quarter}` 记 last_fetched_at（空结果也写）。
+      `FinancialQuarterService`（CheckQuarter）+ `PerformanceService`（express/forecast 走 CheckRange）+ `FinancialWriter`
+      （financial_report upsert + 两套水位）+ `FinancialReadService`（季度六类/综合指标合并/快报预告 3 种 serving）+
+      9 个工具路由。`FetchRequest` 加 Quarter/ReportType。`dotnet test` 146/146。**未部署**。
+
+  **P5 全部数据类型代码移植完成（12/12 抓取函数）**。剩：kline_minute 分区 DDL、
+  DateTools 派生 serving（is_trading_day 等）、快照 stock_list/index/industry 的 snap_date 解析 serving。
+
+- ✅ **整体部署验证（2026-06-25）**：重建 fetch（拿到全部 fetch 类型）+ mcp（管线全开），`./up.sh fetch mcp`。
+  `LiveDeployVerifyTests` 驱动各 dotnet 服务打真 fetch_service→baostock→落真 PG，**6 类型 + k_d 全部真实落库**：
+  kline 6446 / kline_minute(30m) 6688 / trade_calendar 12097 / deposit_rate 41 / financial_report 6 / adjust_factor 26 /
+  stock_basic 1。覆盖四种 coverage 模式 + 复权。**单测 147/147**。
+  修复一个 bug：分钟线 bar_time 是 +08 DateTimeOffset，Npgsql 要求 timestamptz 参数为 UTC 偏移 → 写/读均 `.ToUniversalTime()`，
+  已重建 mcp（fetch 未重启，会话保留，§0 达标）。
+- ✅ **MCP 协议层 serving 实测（2026-06-25）**：最小 MCP Streamable HTTP 客户端（initialize→initialized→
+  tools/call，SSE 解析）实调运行中 mcp 容器：握手成功、tools/list 44 个工具；`get_historical_k_data` 不复权 +
+  **前复权(flag=2 因子生效)** + `get_trade_dates`(日历) + `get_deposit_rate_data`(空结果正确) 均经协议返回正确 JSON。
+  完整链路 MCP 协议→工具→dotnet 服务(管线 ON)→直读 PG→序列化→协议返回 全程验证。serving 侧闭环。
+    - ✅ **宏观 5 表（代码+单测，2026-06-25）**：EF 实体 5 个（deposit/loan 数字列名 `[Column]` 显式，
+      rrr/money_supply 约定正确）+ 迁移 `AddMacroTables` 已 apply（snake_case 约定**加守卫**不覆盖 `[Column]`）。
+      spec 驱动 `MacroSpecs`/`MacroParser`/`MacroWriter`（移植 _MACRO_SPECS，5 类共用）+ `MacroService`
+      （利率类 ISO 日期、货币供应 YYYY-MM/YYYY，水位折 date）+ `MacroReadService`（PG `json_agg` 通用序列化
+      全列，免逐表手写）+ 5 个工具路由。fetch_service fetch_macro。`dotnet test` 137/137。**未部署**。
+    - ✅ **分钟线 k_5/15/30/60（代码+单测，2026-06-25）**：`KlineMinute` 实体（**普通表**，分区 DDL 暂不做）
+      + 迁移 `AddKlineMinute` 已 apply。`KlineMinuteParser`（bar_time 取 "time" 前 14 位 +08）+ `KlineMinuteWriter`
+      （ON CONFLICT + 水位）+ `KlineMinuteService`（与 KlineService 同构，频率 int，切片 730，**复用 fetch_kline**
+      ——provider.query_k_data 对分钟频率同样适用，无需改 fetch_service）+ `KlineMinuteReadService`（json_agg，
+      bar_time 右开区间 +08）+ get_historical_k_data 分钟分支路由。`dotnet test` 142/142。**未部署**。
+      遗留：kline_minute 旧库按 bar_time RANGE 年度分区（性能），此处普通表，后续可加分区 DDL。
+  - ⬜ **fetch_service 多类型**：worker `_query` 现仅 fetch_kline，需加 fetch_adjust_factor/
+    fetch_trade_calendar/fetch_dividend/fetch_stock_basic/财报/快照（provider.query_* 分发）。
+  - ⬜ **宏观 5 表**（deposit_rate/loan_rate/required_reserve_ratio/money_supply_month/year）：
+    列名带数字（3month/m0/m1）snake_case 约定不可靠，需显式 [Column]，单独一轮。
+  - ⬜ **分钟线**（k_5/15/30/60）：KlineMinute 表按 bar_time RANGE 分区，EF 迁移需自定义分区 DDL，
+    单独处理（或先建普通表）。
 - ⬜ **P6 beat 移植到 dotnet** ⚠️ landmine
   beat 现靠读 PG 决定调度（`_is_trading_day` 查日历、`sync_tracked_codes` 遍历水位），
   PG 只在 dotnet 后**只能在 dotnet 跑**（Quartz.NET / Hangfire / BackgroundService+cron）。
