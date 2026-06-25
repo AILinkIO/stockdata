@@ -24,6 +24,7 @@ RESULT_TTL = 600     # 完成态 job + payload + dedup 索引留存（沿用旧 
 INFLIGHT_TTL = 1200  # 在途 job 安全 TTL / 僵尸阈值（沿用旧 _STALE_RUNNING）
 
 _PENDING_KEY = "fetch:pending"
+_HALTED_KEY = "fetch:halted"  # 抓取暂停标志（baostock 拉黑），持久无 TTL，仅 /restart 清除
 
 
 def _job_redis_url() -> str:
@@ -66,6 +67,22 @@ class JobStore:
         existing = self._r.get(idx_key)
         status = self._r.hget(f"job:{existing}", "status") if existing else None
         return (existing or new_id), (status or "pending"), True
+
+    # ── 抓取暂停标志（baostock 拉黑/接收错误）──
+
+    def set_halted(self, reason: str) -> None:
+        """标记抓取已暂停。持久（无 TTL），跨容器重启保留，直到 /restart 清除。"""
+        self._r.hset(_HALTED_KEY, mapping={"reason": reason, "since": int(time.time())})
+
+    def clear_halted(self) -> None:
+        self._r.delete(_HALTED_KEY)
+
+    def halted_state(self) -> dict | None:
+        """返回 {reason, since} 或 None（未暂停）。"""
+        h = self._r.hgetall(_HALTED_KEY)
+        if not h:
+            return None
+        return {"reason": h.get("reason", ""), "since": int(h.get("since", 0))}
 
     # ── worker 侧 ──
 

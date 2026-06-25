@@ -15,7 +15,7 @@ import time
 import pandas as pd
 
 from fetcher.providers import baostock as provider
-from fetcher.providers.interface import DataSourceError, NoDataFoundError
+from fetcher.providers.interface import BlacklistError, DataSourceError, NoDataFoundError
 from settings import settings
 
 from .jobs import JobStore
@@ -97,6 +97,14 @@ def _run_job(store: JobStore, job_id: str, stop: threading.Event) -> None:
             # 合法空结果（停牌/未发布）：done 空 payload，dotnet 据 claimable_last 处理水位
             store.mark_done(job_id, _df_to_payload(None))
             return
+        except BlacklistError as e:
+            # 出口 IP 被拉黑/持续接收错误：短期取不到数，重试只会延长封禁。
+            # 当前 job 标记 failed + 写 halted 标志暂停抓取（不退进程，HTTP 保活），
+            # _loop 据标志停止消费；待 MCP/前端调 POST /restart 清标志后恢复。
+            logger.error("baostock 拉黑/接收错误，暂停抓取（待 /restart 恢复）: %s", e)
+            store.mark_failed(job_id, str(e))
+            store.set_halted(str(e))
+            return
         except DataSourceError as e:
             if attempt < settings.fetch_max_retries:
                 wait = _backoff_seconds(attempt)
@@ -114,8 +122,18 @@ def _run_job(store: JobStore, job_id: str, stop: threading.Event) -> None:
 
 def _loop(store: JobStore, stop: threading.Event) -> None:
     logger.info("抓取 worker 已启动（串行消费 fetch:pending）")
+    halted_logged = False
     while not stop.is_set():
         try:
+            if store.halted_state():
+                # 已暂停（拉黑）：不消费、不触登录，空转等 /restart 清标志（含容器重启后保留）
+                if not halted_logged:
+                    logger.warning("抓取处于暂停态（halted），等待 /restart 恢复")
+                    halted_logged = True
+                if stop.wait(2):
+                    break
+                continue
+            halted_logged = False
             job_id = store.next_pending(timeout=5)
             if job_id:
                 _run_job(store, job_id, stop)

@@ -6,7 +6,12 @@
 
   POST /fetch          {type, params}        → 202 {job_id, status, dedup}
   GET  /fetch/{job_id}                        → {job_id, status, payload?, error?}
+  GET  /status                                → {worker: running|halted, halted?}
+  POST /restart                               → 清暂停标志、恢复抓取
   GET  /healthz
+
+抓取暂停（halted）：baostock 拉黑/接收错误（10001011/10002007）时 worker 写持久标志、
+停止消费（进程不退、HTTP 保活）。MCP/前端经 GET /status 感知，经 POST /restart 恢复。
 
 进程长驻、单 worker 串行、单例 baostock 会话；**重启间隔 > 5 分钟**（TASK §0 红线）。
 """
@@ -69,6 +74,31 @@ def get_job(job_id: str, response: Response):
         response.status_code = 404
         return {"job_id": job_id, "status": "failed", "payload": None, "error": "job 不存在或已过期"}
     return job
+
+
+@app.get("/status")
+def status():
+    """抓取状态：worker 是否因拉黑暂停。供 MCP/前端感知后台是否停摆。"""
+    halted = _store.halted_state()
+    return {
+        "name": "stockdata-fetch",
+        "worker": "halted" if halted else "running",
+        "halted": halted,  # {reason, since} 或 null
+    }
+
+
+@app.post("/restart")
+def restart():
+    """清除暂停标志、恢复抓取（拉黑解除/换出口 IP 后由 MCP 或前端调用）。
+
+    清标志 → 丢弃可能僵死的 baostock 会话（下个 job 重新登录）。worker 线程一直在
+    空转，标志一清即恢复消费；无需重启进程/容器。
+    """
+    was = _store.halted_state()
+    _store.clear_halted()
+    provider.reset_login_state()
+    logger.info("收到 /restart：清除暂停标志，恢复抓取（原因曾为: %s）", was.get("reason") if was else None)
+    return {"status": "ok", "worker": "running", "was_halted": was is not None, "previous": was}
 
 
 @app.get("/healthz")
