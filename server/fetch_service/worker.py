@@ -15,6 +15,7 @@ import time
 import pandas as pd
 
 from fetcher.providers import baostock as provider
+from core.watchdog import Watchdog, WatchdogTimeout
 from fetcher.providers.interface import BlacklistError, DataSourceError, NoDataFoundError
 from settings import settings
 
@@ -91,7 +92,9 @@ def _run_job(store: JobStore, job_id: str, stop: threading.Event) -> None:
         if stop.is_set():
             return  # 关停：放弃重试，不再触发登录（job 留 running，由 TTL/重投回收）
         try:
-            store.mark_done(job_id, _query(task_type, params))
+            with Watchdog(threading.get_ident(), settings.fetch_watchdog_timeout_seconds):
+                payload = _query(task_type, params)
+            store.mark_done(job_id, payload)
             return
         except NoDataFoundError:
             # 合法空结果（停牌/未发布）：done 空 payload，dotnet 据 claimable_last 处理水位
@@ -104,6 +107,21 @@ def _run_job(store: JobStore, job_id: str, stop: threading.Event) -> None:
             logger.error("baostock 拉黑/接收错误，暂停抓取（待 /restart 恢复）: %s", e)
             store.mark_failed(job_id, str(e))
             store.set_halted(str(e))
+            return
+        except WatchdogTimeout as e:
+            provider.reset_login_state()
+            if attempt < settings.fetch_max_retries:
+                wait = _backoff_seconds(attempt)
+                logger.warning(
+                    "baostock 查询超时（watchdog %ds），重置连接，%ds 后重试: %s",
+                    settings.fetch_watchdog_timeout_seconds, wait, e,
+                )
+                store.mark_running(job_id)
+                if stop.wait(wait):
+                    return
+                continue
+            store.mark_failed(
+                job_id, f"抓取超时（watchdog {settings.fetch_watchdog_timeout_seconds}s，重试耗尽）")
             return
         except DataSourceError as e:
             if attempt < settings.fetch_max_retries:

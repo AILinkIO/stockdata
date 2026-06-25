@@ -26,5 +26,10 @@ class Settings(BaseSettings):
     fetch_retry_base_seconds: int = 30  # 指数退避基数（30→60→120→…）
     fetch_retry_max_backoff_seconds: int = 180  # 单次退避等待封顶（默认 3 分钟）
 
+    # ── watchdog 硬超时（兜底 baostock 库内部死循环）──
+    # baostock socketutil.send_msg 在服务端断连后 recv→b"" 无限自旋，
+    # socket 超时对此无效（recv 不阻塞）。watchdog 到点强制注入异常中断。
+    fetch_watchdog_timeout_seconds: int = 600  # 单次 baostock 查询的硬超时（默认 10 分钟）
+
 
 settings = Settings()
