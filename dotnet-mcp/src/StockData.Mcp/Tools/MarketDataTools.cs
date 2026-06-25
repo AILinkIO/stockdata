@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using ModelContextProtocol.Server;
+using StockData.Mcp.Data;
 using StockData.Mcp.StockDataClient;
 
 namespace StockData.Mcp.Tools;
@@ -12,6 +13,7 @@ public static class MarketDataTools
     [Description("获取股票历史K线数据。frequency: d日/w周/m月/5/15/30/60分钟；adjust_flag: 1后复权/2前复权/3不复权。代码支持 sh.600000/600000/600000.SH 等格式。")]
     public static async Task<string> GetHistoricalKData(
         StockDataApiClient api,
+        KlineReadService pipeline,
         [Description("股票代码，如 sh.600000")] string code,
         [Description("起始日期 YYYY-MM-DD")] string start_date,
         [Description("结束日期 YYYY-MM-DD")] string end_date,
@@ -21,6 +23,16 @@ public static class MarketDataTools
         CancellationToken ct = default)
     {
         var isMinute = frequency is "5" or "15" or "30" or "60";
+
+        // 管线开启 + d/w/m 不复权：走 dotnet（EnsureRange + 直读 PG）。
+        // 分钟线 / 复权（adjust_flag 1/2）尚未迁移，仍回退旧 Python REST。
+        if (pipeline.Enabled && !isMinute && adjust_flag == "3"
+            && DateOnly.TryParse(start_date, out var s) && DateOnly.TryParse(end_date, out var e))
+        {
+            var norm = CodeNormalizer.ToBaostock(code);
+            return JsonHelper.Truncate(await pipeline.GetHistoricalJsonAsync(norm, frequency, s, e, ct), limit);
+        }
+
         var path = isMinute
             ? $"/api/v1/stocks/{code}/kline-minute"
             : $"/api/v1/stocks/{code}/kline";

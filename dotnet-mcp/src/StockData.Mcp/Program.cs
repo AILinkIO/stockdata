@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Http.Resilience;
+using StockData.Mcp.Data;
 using StockData.Mcp.StockDataClient;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -19,6 +20,14 @@ builder.Services.AddHttpClient<StockDataApiClient>(c =>
     });
 
 builder.Services.AddMemoryCache();
+
+// dotnet 数据管线（迁移中）：默认关闭，开启需 StockData:PipelineEnabled=true。
+// KlineReadService 始终注册（仅依赖 IServiceProvider/IConfiguration），其 Enabled 反映开关；
+// 关闭时工具不调用它、走旧 REST → 现网行为与今日完全一致。重服务（DbContext/KlineService/
+// HttpFetchClient）仅开启时注册。
+builder.Services.AddSingleton<StockData.Mcp.Data.KlineReadService>();
+if (builder.Configuration.GetValue<bool>("StockData:PipelineEnabled"))
+    builder.Services.AddStockDataPipeline(builder.Configuration);
 
 builder.Services
     .AddMcpServer()
