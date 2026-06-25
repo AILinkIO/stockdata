@@ -52,6 +52,20 @@ public static class ServiceCollectionExtensions
             c.Timeout = Timeout.InfiniteTimeSpan;  // 超时交给 HttpFetchClient 的轮询 deadline
         });
 
+        // fetch 暂停（baostock 拉黑）感知 + 自动恢复：控制面 typed client + 后台监视。
+        // 控制面调用短平快（/status、/restart 都即时返回），给短超时而非 Infinite。
+        services.AddHttpClient<IFetchControl, FetchControlClient>(c =>
+        {
+            c.BaseAddress = new Uri(fetchBase);
+            c.Timeout = TimeSpan.FromSeconds(10);
+        });
+        services.AddSingleton(new FetchHaltMonitorOptions
+        {
+            PollSeconds = config.GetValue("StockData:FetchHaltPollSeconds", 60),
+            RestartCooldownSeconds = config.GetValue("StockData:FetchRestartCooldownSeconds", 600),
+        });
+        services.AddHostedService<FetchHaltMonitor>();
+
         return services;
     }
 }
