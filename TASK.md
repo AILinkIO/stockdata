@@ -174,8 +174,29 @@
       （financial_report upsert + 两套水位）+ `FinancialReadService`（季度六类/综合指标合并/快报预告 3 种 serving）+
       9 个工具路由。`FetchRequest` 加 Quarter/ReportType。`dotnet test` 146/146。**未部署**。
 
-  **P5 全部数据类型代码移植完成（12/12 抓取函数）**。剩：kline_minute 分区 DDL、
-  DateTools 派生 serving（is_trading_day 等）、快照 stock_list/index/industry 的 snap_date 解析 serving。
+  **P5 全部数据类型代码移植完成（12/12 抓取函数）**。
+
+- ✅ **kline_minute 分区 DDL（2026-06-25）**：迁移 `PartitionKlineMinute`（手写 migrationBuilder.Sql，EF 不建模分区）
+  把普通表转为按 bar_time 年度 RANGE 分区——重命名旧表→建分区父表(PK 含 bar_time)→年度分区 2023-2031+default→
+  迁数据→删旧。**踩坑**：PK 索引名全局唯一，重命名表后旧约束需先 RENAME 腾名。已 apply：6688 行保留、2026 数据
+  872 行正确路由到 _2026 分区、MCP 协议读 30 分钟线正常（分区对 serving 透明）。
+
+  ## 🏁 迁移全线完成（P1–P5 + 部署 + 双向协议验证 + 分区）
+  dotnet 唯一 PG 属主 + Python 无状态 baostock 抓取微服务。12/12 抓取函数、四种 coverage 模式、全部 MCP 工具 serving
+  均已部署上线并经 MCP 协议实测。单测 147/147。线上：fetch(:8090)+mcp(:8000 管线ON)，旧 api 未启。
+
+- ✅ **快照三件套 serving（2026-06-25，代码+实测）**：`SnapshotReadService`（snap_date 缺省解析最近交易日、
+  stock_list 当日未发布回退前一交易日最多 4 次、PG `json_build_object` 精确列排除 updated_at）+ 9 工具路由
+  （get_all_stock/search_stocks/get_suspensions、get_index_constituents/sz50/hs300/zz500、get_stock_industry/
+  list_industries/get_industry_members——派生工具复用基础 JSON 过滤）。host harness 实测：stock_list 7280/sz50 50/
+  industry 5530 真实落库 + serving JSON 输出正确（中文 UTF-8、按 code 序）。单测 147/147。
+  **已部署 + MCP 协议实测全过**：get_sz50_stocks(50) / search_stocks(浦发) / get_suspensions(19) /
+  get_stock_industry / list_industries(聚合计数) / get_industry_members(货币金融 45) 经协议返回正确。
+  （mcp 重建曾卡 MCR 基础镜像慢拉 ~30min，docker 把 dotnet 基础镜像 prune 了需重拉 184MB。）
+
+- ✅ **DateTools 派生工具（2026-06-25，已部署+协议实测）**：`TradingDaysReadService`（移植 dates.py，
+  基于已迁 trade_calendar 计算，45 天回看）+ 6 工具路由（latest/is/previous/next/last_n/recent_range）。
+  EnsureRange 自动把日历补到当年。MCP 协议实测全过且反映真实假期（2026-06-19 端午非交易日）。单测 147/147。
 
 - ✅ **整体部署验证（2026-06-25）**：重建 fetch（拿到全部 fetch 类型）+ mcp（管线全开），`./up.sh fetch mcp`。
   `LiveDeployVerifyTests` 驱动各 dotnet 服务打真 fetch_service→baostock→落真 PG，**6 类型 + k_d 全部真实落库**：
@@ -209,9 +230,15 @@
   PG 只在 dotnet 后**只能在 dotnet 跑**（Quartz.NET / Hangfire / BackgroundService+cron）。
   4 个任务（日历 08:00 / 昨日列表 08:30 / 市场 17:00 / 已入库代码 17:10 + 交易日 gating）
   整体移植，读 PG 决定 → 调 `POST /fetch`（复用去重）。
-- ⬜ **P7 Python 瘦身**
-  删 `api/`、`db/`(session/models/coverage)、`writer.py`、`beat.py`、Celery 与
-  SQLAlchemy/psycopg/alembic 依赖；只留抓取 + 限流 + Redis job + HTTP。镜像变小。
+- ✅ **P7 Python 瘦身（2026-06-25）**
+  删 `api/`、`db/`、`fetcher/{tasks,app,beat,worker,writer}.py`、`core/{timeutil,helpers}.py`、`tests/`、`deploy/`、
+  `alembic.ini`——Python 仅剩 11 文件（fetch_service + providers + core.ratelimit + settings）。pyproject 依赖
+  41→**24 包**（删 sqlalchemy/alembic/celery/psycopg，celery 原带 redis 改直接依赖），`uv lock` 重锁。
+  **连带修复**：删 api 后发现部分 mcp 工具仍靠旧 api 取数（k_d 切换后已坏）——全部迁到 dotnet：
+  `KlineLoader` 改读 `KlineReadService`（修复 rsi/obv/cci/dual_ma/ma_alignment/vegas 6 个指标工具）、
+  `UtilTools` 用 CodeNormalizer+指数映射（纯函数）、`get_adjust_factor_data`→`AdjustFactorReadService`、
+  `get_stock_analysis`→`StockAnalysisService`（港 Markdown 报告，聚合基本/行业/财报/K线）。
+  compose 删 migrate/api 服务（只剩 fetch+mcp，镜像 stockdata-fetch）。重建两容器，MCP 协议实测全过。单测 148/148。
 - ⬜ **P8 切换与验证**
   流量切到 dotnet 路径（红线 #3：切换瞬间只一套登录态）；验证全类型读穿透、定时同步、
   幂等重投；保留回退开关。
