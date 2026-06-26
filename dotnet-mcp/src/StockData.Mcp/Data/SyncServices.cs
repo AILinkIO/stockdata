@@ -14,7 +14,7 @@ public sealed record SyncOutcome(string Code, string Status, string[] Done, stri
 /// 每步幂等（Coverage：Fresh 跳过）→ 天然续传。<see cref="StockSyncTask.DatasetsDone"/> 作粗粒度
 /// 快跳、每步完成即落库（细到步级断点）；data_watermark 是数据集级断点。
 /// 抓取失败（fetch 超时/失败，多因 baostock 熔断 halt）→ 标 partial 退出，下轮 /sync/run 续传，
-/// 不在 halt 期间硬刚（§0）。串行逐查询提交，配速由 fetch 微服务 60/min 限流兜住。
+/// 不在 halt 期间硬刚（§0）。串行逐查询提交，配速由 fetch 微服务 90/min 限流兜住。
 /// 单例：自建 DI scope（Scoped 的 DbContext/各 Service）。
 /// </summary>
 public sealed class StockSyncService(IServiceProvider root, IConfiguration config)
@@ -98,6 +98,10 @@ public sealed class StockSyncService(IServiceProvider root, IConfiguration confi
             task = new StockSyncTask { Code = code, Kind = kind, Status = "pending", DatasetsDone = [], RequestedAt = now };
             db.StockSyncTasks.Add(task);
         }
+        // 仅 partial（上轮中断）才续传保留 datasets_done；pending / 过期 done 都是新一轮 → 清空重走
+        // （Coverage 仍会跳过已新鲜的数据集，新一轮成本低但能刷新；否则 datasets_done 满会假装完成不刷新）
+        var resume = task.Status == "partial";
+        if (!resume) task.DatasetsDone = [];
         task.Status = "running";
         task.StartedAt = now;
         task.Attempt += 1;
@@ -191,43 +195,27 @@ public sealed class SyncMarketService(IServiceProvider root, IConfiguration conf
 }
 
 /// <summary>
-/// 命令式批量续传（TASK 本轮 D-4，/sync/run 由外部 cron 调）：扫 stock_sync_task 取
-/// pending / partial（中断待续）/ done 但已过期（finished_at 早于 StaleAfterHours）的票，
-/// 逐票 SyncStockAsync。**遇 partial（多为 halt）即停**，下轮再续，不在 halt 期硬刚（§0）。
+/// 同步控制面（cron 调，均快返回、不抓 baostock）：消费由常驻 <see cref="SyncDrainer"/> 负责。
 /// </summary>
-public sealed class SyncRunService(IServiceProvider root, IConfiguration config, StockSyncService stockSync)
+public sealed class SyncRunService(IServiceProvider root, IConfiguration config)
 {
     public bool Enabled => config.GetValue<bool>("StockData:PipelineEnabled");
 
-    public async Task<object> RunAsync(int max, CancellationToken ct = default)
+    /// <summary>
+    /// cron「生成队列」：把上次完成早于 StaleAfterHours 的 done 任务重置为 pending，交 Drainer 后台消费。
+    /// 立即返回（只一条 UPDATE，不碰 baostock）。pending/partial 本就在队列里，无需触碰。
+    /// </summary>
+    public async Task<object> RefreshAsync(CancellationToken ct = default)
     {
         await using var scope = root.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<StockDataDbContext>();
         var now = scope.ServiceProvider.GetRequiredService<TimeProvider>().GetUtcNow();
         var staleHours = config.GetValue("StockData:Sync:StaleAfterHours", 20);
         var cutoff = now.AddHours(-staleHours);
-
-        var todo = await db.StockSyncTasks.AsNoTracking()
-            .Where(t => t.Status == "pending" || t.Status == "partial"
-                        || (t.Status == "done" && t.FinishedAt < cutoff))
-            .OrderBy(t => t.UpdatedAt)
-            .Select(t => new { t.Code, t.Kind })   // full 与 minute 都续传，按 kind 分派
-            .Take(max)
-            .ToListAsync(ct);
-
-        int done = 0, partial = 0, failed = 0;
-        var stopped = false;
-        foreach (var t in todo)
-        {
-            if (ct.IsCancellationRequested) break;
-            var o = t.Kind == "minute"
-                ? await stockSync.SyncMinuteAsync(t.Code, ct)
-                : await stockSync.SyncStockAsync(t.Code, ct);
-            if (o.Status == "done") done++;
-            else if (o.Status == "partial") { partial++; stopped = true; break; }  // halt → 停，下轮续
-            else failed++;
-        }
-        return new { processed = done + partial + failed, done, partial, failed, candidates = todo.Count, stopped };
+        var requeued = await db.Database.ExecuteSqlRawAsync(
+            "UPDATE stock_sync_task SET status = 'pending', updated_at = now() WHERE status = 'done' AND finished_at < {0}",
+            new object[] { cutoff }, ct);
+        return new { requeued, cutoff_hours = staleHours };
     }
 
     /// <summary>同步进度观测：按状态计数 + 已纳管票数。</summary>
