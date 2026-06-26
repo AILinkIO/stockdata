@@ -55,4 +55,36 @@ app.MapGet("/healthz", () => Results.Json(new
     version = typeof(Program).Assembly.GetName().Version?.ToString() ?? "0.0.0",
 }));
 
+// ── 命令式同步接口（P2，由外部 cron 驱动；管线关闭时 503）──
+// 单票全数据同步：POST /sync/stock?code=sh.600000[&minute=true]
+app.MapPost("/sync/stock", async (HttpContext http, string code, bool? minute, CancellationToken ct) =>
+{
+    var sync = http.RequestServices.GetService<StockSyncService>();
+    if (sync is null) return Results.Json(new { error = "pipeline disabled (StockData:PipelineEnabled=false)" }, statusCode: 503);
+    if (minute == true) return Results.Json(new { error = "分钟线同步任务待 P3 实现" }, statusCode: 501);
+    if (string.IsNullOrWhiteSpace(code)) return Results.Json(new { error = "缺少 code" }, statusCode: 400);
+    return Results.Json(await sync.SyncStockAsync(CodeNormalizer.ToBaostock(code), ct));
+});
+// 批量续传：POST /sync/run?max=200（扫 pending/partial/过期票，逐票续传，遇 halt 即停）
+app.MapPost("/sync/run", async (HttpContext http, int? max, CancellationToken ct) =>
+{
+    var run = http.RequestServices.GetService<SyncRunService>();
+    if (run is null) return Results.Json(new { error = "pipeline disabled" }, statusCode: 503);
+    return Results.Json(await run.RunAsync(max is > 0 ? max.Value : 200, ct));
+});
+// 市场级数据：POST /sync/market（日历/列表/行业/指数成分，cron 每日先于 /sync/run 调）
+app.MapPost("/sync/market", async (HttpContext http, CancellationToken ct) =>
+{
+    var m = http.RequestServices.GetService<SyncMarketService>();
+    if (m is null) return Results.Json(new { error = "pipeline disabled" }, statusCode: 503);
+    return Results.Json(await m.SyncMarketAsync(ct));
+});
+// 进度观测：GET /sync/status
+app.MapGet("/sync/status", async (HttpContext http, CancellationToken ct) =>
+{
+    var run = http.RequestServices.GetService<SyncRunService>();
+    if (run is null) return Results.Json(new { error = "pipeline disabled" }, statusCode: 503);
+    return Results.Json(await run.StatusAsync(ct));
+});
+
 app.Run("http://0.0.0.0:8000"); // 沿用旧 Python MCP 的端口，存量客户端配置不变

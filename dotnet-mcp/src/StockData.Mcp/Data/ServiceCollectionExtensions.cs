@@ -38,6 +38,11 @@ public static class ServiceCollectionExtensions
         services.AddScoped<PerformanceService>();
         services.TryAddSingleton(TimeProvider.System);
 
+        // 命令式同步编排（P2）：单例，各自建 scope（仅管线开启时注册，端点据此 503 判活）
+        services.AddSingleton<StockSyncService>();
+        services.AddSingleton<SyncMarketService>();
+        services.AddSingleton<SyncRunService>();
+
         services.AddSingleton(new FetchClientOptions
         {
             WaitTimeoutSeconds = config.GetValue("StockData:FetchWaitTimeout", 120),
