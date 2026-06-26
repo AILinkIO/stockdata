@@ -27,4 +27,10 @@ internal static class SyncRegistry
         => string.IsNullOrEmpty(code)
             ? Task.CompletedTask
             : db.Database.ExecuteSqlRawAsync(Sql, new[] { new NpgsqlParameter("c", code) }, ct);
+
+    /// <summary>标记某票已纳管分钟线（显式分钟线同步时置位；行须先经 RegisterIfNew 存在）。</summary>
+    public static Task EnableMinuteAsync(StockDataDbContext db, string code, CancellationToken ct = default)
+        => db.Database.ExecuteSqlRawAsync(
+            "UPDATE synced_stock SET minute_enabled = true, updated_at = now() WHERE code = @c",
+            new[] { new NpgsqlParameter("c", code) }, ct);
 }
