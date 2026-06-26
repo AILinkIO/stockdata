@@ -38,6 +38,7 @@ services:
       StockData__ApiBase: http://127.0.0.1:8080
       StockData__PipelineEnabled: "true"
       StockData__FetchBase: http://127.0.0.1:8090
+      StockData__ServeFromPgOnly: "true"   # 新抓取模型：读纯走 PG + 懒登记 + 定向高优先有界抓 + 常驻 Drainer
     restart: unless-stopped
     depends_on:
       fetch:
