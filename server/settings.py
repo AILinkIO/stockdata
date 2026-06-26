@@ -31,5 +31,14 @@ class Settings(BaseSettings):
     # socket 超时对此无效（recv 不阻塞）。watchdog 到点强制注入异常中断。
     fetch_watchdog_timeout_seconds: int = 600  # 单次 baostock 查询的硬超时（默认 10 分钟）
 
+    # ── 空闲自动登出（防服务端断连后复用僵死 socket 报 10002007）──
+    # worker 闲置超过此秒数即主动 bs.logout 关连接，下次查询重新 login。<=0 关闭。
+    fetch_idle_logout_seconds: int = 900  # 默认 15 分钟
+
+    # ── 网络接收错误(10002007)熔断 ──
+    # 10002007 默认按可重试处理（relogin 自愈）；连续达到此次数仍失败才升级为
+    # 暂停（BlacklistError → 待 /restart），避免把瞬时网络抖动误判为 IP 拉黑。
+    fetch_receive_error_halt_threshold: int = 5
+
 
 settings = Settings()

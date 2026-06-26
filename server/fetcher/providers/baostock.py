@@ -15,6 +15,7 @@ import os
 import socket
 import sys
 import threading
+import time
 from contextlib import contextmanager
 
 import baostock as bs
@@ -34,15 +35,17 @@ _RETRYABLE_CODES = frozenset(
         "10002001",  # 网络错误
         "10002002",  # 网络连接失败
         "10002004",  # 连接断开
+        "10002007",  # 网络接收错误：长连接被服务端断开后 recv 空包，relogin 即恢复（见 _receive_error）
     }
 )
 
-# 致命错误码：出口 IP 被拉黑 / 持续接收错误。短期无法取数、重试只会延长封禁，
-# 一旦命中即抛 BlacklistError → 任务层退出进程（见 interface.BlacklistError）。
+# 致命错误码：出口 IP 被真实拉黑。短期无法取数、重试只会延长封禁，
+# 一旦命中即抛 BlacklistError → 任务层暂停抓取待 /restart（见 interface.BlacklistError）。
+# 注：10002007 不在此列——实测可经 relogin 自愈，仅在“连续多次仍失败”时由
+# _receive_error 升级为 BlacklistError（熔断），避免把瞬时网络抖动误判为拉黑。
 _BLACKLIST_CODES = frozenset(
     {
         "10001011",  # 黑名单用户
-        "10002007",  # 网络接收错误（实测为长时间不可恢复，按拉黑处置）
     }
 )
 
@@ -52,6 +55,37 @@ def _is_blacklist(code: str, msg: str) -> bool:
 
 _logged_in = False
 _BS_LOCK = threading.RLock()
+# 上次成功登录/查询的 monotonic 时刻，用于空闲自动登出（见 should_idle_logout）
+_last_activity = 0.0
+# 连续 10002007（网络接收错误）计数：仅成功取数才清零（见 _reset_recv_errors），
+# 累计到阈值由 _receive_error 升级为 BlacklistError 熔断暂停。
+_consecutive_recv_errors = 0
+
+
+def _stamp_activity() -> None:
+    """记录一次成功的连接使用时刻（登录/查询），重置空闲计时。"""
+    global _last_activity
+    _last_activity = time.monotonic()
+
+
+def _reset_recv_errors() -> None:
+    """成功取数后清零连续接收错误计数（注意：登录成功不清零，避免每次 relogin 重置熔断）。"""
+    global _consecutive_recv_errors
+    _consecutive_recv_errors = 0
+
+
+def _receive_error(msg: str) -> Exception:
+    """处理 10002007：累计连续次数；未达阈值返回可重试 DataSourceError（relogin 重试），
+    达到 settings.fetch_receive_error_halt_threshold 则升级 BlacklistError 触发暂停（熔断）。"""
+    global _consecutive_recv_errors
+    _consecutive_recv_errors += 1
+    if _consecutive_recv_errors >= settings.fetch_receive_error_halt_threshold:
+        return BlacklistError(
+            f"{msg}（连续 {_consecutive_recv_errors} 次网络接收错误，relogin 无法恢复，"
+            f"熔断暂停待 /restart）"
+        )
+    logger.warning("网络接收错误(10002007) 第 %d 次，将重登录重试: %s", _consecutive_recv_errors, msg)
+    return DataSourceError(msg)
 
 _RATE_LIMITER = create_rate_limiter(
     max_calls=settings.fetch_rate_limit_per_minute,
@@ -125,6 +159,7 @@ def ensure_login() -> None:
             )
         raise LoginError(f"Baostock 登录失败: {lg.error_msg} (code: {lg.error_code})")
     _logged_in = True
+    _stamp_activity()
     logger.info("Baostock 登录成功 (pid=%s)", os.getpid())
 
 
@@ -171,6 +206,27 @@ def logout() -> None:
         _logged_in = False
 
 
+def should_idle_logout(idle_timeout: float) -> bool:
+    """空闲已超过 idle_timeout 秒且仍持登录态 → 应主动登出。idle_timeout<=0 关闭。
+
+    纯时间戳比较、不触网，供 worker 空闲分支轮询。未登录时无连接可关，返回 False。
+    """
+    if idle_timeout <= 0 or not _logged_in:
+        return False
+    return time.monotonic() - _last_activity >= idle_timeout
+
+
+def idle_logout() -> None:
+    """空闲到点主动登出、关闭 socket：下次查询重新 login，避免复用服务端已断的
+    僵死连接（10002007 网络接收错误的常见来源）。复用 logout()（取锁+静音+容错）。
+
+    ⚠️ bs.logout 在已断 socket 上同样可能 recv 空转死循环，调用方须用 Watchdog 兜底。
+    调用方（worker 空闲分支）须确保此刻无并发查询。
+    """
+    logger.info("baostock 空闲 ≥ 阈值，主动登出释放连接（下次查询重新登录）")
+    logout()
+
+
 # ── 通用查询流程 ──
 
 
@@ -180,6 +236,8 @@ def _check_api_error(rs, description: str) -> None:
     msg = f"{description}: {rs.error_msg} (code: {rs.error_code})"
     if "no record found" in rs.error_msg.lower() or rs.error_code == "10002":
         raise NoDataFoundError(msg)
+    if rs.error_code == "10002007":  # 网络接收错误：可重试/熔断（见 _receive_error）
+        raise _receive_error(msg)
     if _is_blacklist(rs.error_code, rs.error_msg):
         raise BlacklistError(msg)
     raise DataSourceError(msg)
@@ -217,7 +275,7 @@ def _query(bs_func, description: str, **kwargs) -> pd.DataFrame:
             return df
 
         try:
-            return _do()
+            df = _do()
         except NoDataFoundError:
             raise
         except Exception as e:
@@ -227,7 +285,10 @@ def _query(bs_func, description: str, **kwargs) -> pd.DataFrame:
                 raise DataSourceError(f"{description}: 未预期错误 - {e}") from e
             logger.warning("%s: 可重试错误，重新登录后重试一次: %s", description, e)
             force_relogin()
-            return _do()
+            df = _do()
+        _stamp_activity()      # 成功取数：重置空闲计时
+        _reset_recv_errors()   # 成功取数：清零连续接收错误熔断计数
+        return df
 
 
 # ── K 线默认字段（按频率区分，与旧实现一致） ──
