@@ -72,13 +72,24 @@
     一次往返、不触 baostock。**PG 实跑验证**：首次插 1、二次幂等(INSERT 0 0)、最终各 1 行。
   - 旧穿透为安全网：开关默认 false → **现网零行为变化**；翻 true 才进“纯 PG + 懒登记”态（待 P2 命令就绪后切）。
   - `dotnet build` 0 error、`dotnet test` 162/162。**未部署**（开关默认 false，部署与否当前等价；随 P2 一起上）。
-- ⬜ **P2 单票同步编排 + 命令接口（核心）**
-  - `StockSyncService.SyncStockAsync(code)`：顺序复用现成 `EnsureXxxAsync`（basic→k_d→adjust→dividend→
-    fin→perf），每步幂等续传；写 `stock_sync_task` 状态(pending→running→partial/done/failed)+datasets_done；
-    遇熔断 BlacklistError → 标 partial 退出，等下轮续。**串行提交**配合 60/min 限流，避开 FetchWaitTimeout(120s)。
-  - 命令接口（dotnet MCP 服务 :8000，新增管理端点或 MCP 工具）：
-    `POST /sync/stock?code=` / `POST /sync/run`(扫表续传) / `POST /sync/market` / `GET /sync/status`。
-  - 接外部 cron（收盘后：先 /sync/market 再 /sync/run）。验证后翻 `ServeFromPgOnly=true`，baostock 移出读路径。
+- ✅ **P2 单票同步编排 + 命令接口（核心，2026-06-26，已部署+实跑验证）**
+  - `Data/SyncServices.cs`：3 个单例（各自建 scope，复用现成 Ensure）：
+    - `StockSyncService.SyncStockAsync(code)`：顺序 `EnsureXxx`（stock_basic→k_d→adjust→dividend→financial→
+      performance），每步幂等续传；写 `stock_sync_task`(pending→running→done/partial/failed)，**每步完成即落 datasets_done**
+      （步级断点）；dividend/financial 下限取 ipo 年（无则 A 股 epoch）。抓取失败(FetchTimeout/FetchFailed，多为
+      halt)→ 标 partial 保进度退出，**不在 halt 期硬刚**（§0）；其余异常 → failed。
+    - `SyncMarketService.SyncMarketAsync()`：日历(去年初~今年末)→ 解析最近交易日 → stock_list/industry/index 三快照。
+    - `SyncRunService.RunAsync(max)`：扫 pending/partial/过期(StaleAfterHours,默认20h)票逐个续传，**遇 partial 即停**下轮再续；
+      `StatusAsync()` 按状态计数 + registered。
+  - 端点（Program.cs，管线关时 503）：`POST /sync/stock?code=[&minute=]` / `POST /sync/run?max=` /
+    `POST /sync/market` / `GET /sync/status`。DI 注册在 `AddStockDataPipeline`。
+  - **实跑验证（mcp 重建部署，未碰 fetch）**：`/sync/status`→空表结构；`/sync/market`→`{done, snap_date:2026-06-26}`；
+    `/sync/stock?code=sh.600000`→ registered=1、status 流转、`datasets_done` 实时推进 `{stock_basic→k_d→adjust_factor→
+    dividend→…}`、真数据落盘(dividend 22/financial 12↑/adjust 26)、fetch 全程 healthy 无 halt（① 自愈生效）。
+    `dotnet test` 162/162。
+  - ⚠️ **冷启全史单票同步很慢**：financial 每季在 worker 跑 6 类 baostock 查询，~110 季×6≈660 次/60min ≈ 十几分钟；
+    属懒加载一次性成本，**可续传**（Coverage 跳已抓季）。后续可加“近 N 年”上限配置收敛（见 R2）。
+  - ⬜ **未做：接外部 cron + 翻 `ServeFromPgOnly=true`**——待确认夜间 /sync/run 能持续喂数后再切（把 baostock 移出读路径）。
 - ⬜ **P3 分钟线特殊任务**
   - `SyncMinuteService.SyncMinuteAsync(code)`：k_5/15/30/60 全历史（复用 RangeSlicer 730 切片，每切片水位=续传点）。
     `kind='minute'`；命令 `POST /sync/stock?code=&minute=true`（或独立端点）。默认全量同步不含分钟线。
