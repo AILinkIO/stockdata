@@ -90,9 +90,27 @@
   - ⚠️ **冷启全史单票同步很慢**：financial 每季在 worker 跑 6 类 baostock 查询，~110 季×6≈660 次/60min ≈ 十几分钟；
     属懒加载一次性成本，**可续传**（Coverage 跳已抓季）。后续可加“近 N 年”上限配置收敛（见 R2）。
   - ⬜ **未做：接外部 cron + 翻 `ServeFromPgOnly=true`**——待确认夜间 /sync/run 能持续喂数后再切（把 baostock 移出读路径）。
-- ⬜ **P3 分钟线特殊任务**
-  - `SyncMinuteService.SyncMinuteAsync(code)`：k_5/15/30/60 全历史（复用 RangeSlicer 730 切片，每切片水位=续传点）。
-    `kind='minute'`；命令 `POST /sync/stock?code=&minute=true`（或独立端点）。默认全量同步不含分钟线。
+- ✅ **P3 分钟线特殊任务（2026-06-26，代码完成，未部署）**
+  - 重构 `StockSyncService`：抽出共用任务骨架 `RunTaskAsync(code, kind, work)`（登记→加载/新建 task→running→逐步
+    幂等+落 datasets_done→done/partial/failed），full 与 minute 共用，零重复。
+  - `SyncMinuteAsync(code)`（kind=minute）：`SyncRegistry.EnableMinuteAsync` 置 minute_enabled，逐 freq
+    k_5/15/30/60 调 `KlineMinuteService.EnsureRangeAsync`（floor=MinuteBackfillStart 2023-01-01，RangeSlicer 730 切片，
+    每切片水位=续传点）；datasets_done 记 `k_5/k_15/k_30/k_60`。
+  - 端点 `POST /sync/stock?code=&minute=true` → SyncMinuteAsync（去掉 501）。
+  - `/sync/run` 升级：不再限 kind=full，**full 与 minute 都续传**（按 kind 分派 SyncStockAsync/SyncMinuteAsync），
+    minute 仅对已 enable 的票存在 → 天然 opt-in。
+  - `dotnet build` 0 error、`dotnet test` 162/162。**未部署**（按 David 要求；分钟路径复用 P2 已实跑的 RunTaskAsync
+    骨架 + 已部署的 KlineMinuteService，置信高）。
+  - 观测（P2 部署期跑的 sh.600000 全量同步）：client 600s 超时断开后**服务端编排继续推进**（financial 已 348 行
+    = 6 类×58 季），证明单票同步对断连健壮。**结论**：cron 应放长超时或 fire-and-forget + 轮询 /sync/status，
+    勿用短超时同步阻塞。
+
+## 6. 收尾（待 David 拍板/部署）
+
+- ⬜ 重建 mcp 部署 P2+P3（未碰 fetch，§0 无关）。
+- ⬜ 接外部 cron：收盘后 `POST /sync/market` → `POST /sync/run?max=N`（放长超时）。
+- ⬜ 验证夜间 /sync/run 能持续喂数后，翻 `StockData:ServeFromPgOnly=true`，把 baostock 移出读路径（最终切换）。
+- ⬜ 可选优化：dividend/financial 加“近 N 年”上限配置，收敛冷启全史成本（见 R2）。
 
 ## 4. 风险与失效模式
 
