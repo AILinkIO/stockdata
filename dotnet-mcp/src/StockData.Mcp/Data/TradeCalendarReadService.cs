@@ -24,8 +24,9 @@ public sealed class TradeCalendarReadService(IServiceProvider root, IConfigurati
         var svc = sp.GetRequiredService<TradeCalendarService>();
         var time = sp.GetRequiredService<TimeProvider>();
 
-        // 市场级（日历）：ServeFromPgOnly 下纯读，由 /sync/market 保新鲜（P2）
-        if (!ServeFromPgOnly) await svc.EnsureRangeAsync(start, end, time.GetUtcNow(), ct);
+        // 市场级（日历）：方案 A 下 pgOnly→定向高优先有界抓取；后台/手动 /sync/market 也保新鲜
+        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+            c => svc.EnsureRangeAsync(start, end, time.GetUtcNow(), c));
 
         var rows = await db.TradeCalendars.AsNoTracking()
             .Where(c => c.CalendarDate >= start && c.CalendarDate <= end)

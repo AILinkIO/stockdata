@@ -26,7 +26,8 @@ public sealed class FinancialReadService(IServiceProvider root, IConfiguration c
         var db = sp.GetRequiredService<StockDataDbContext>();
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
         if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
-        else await sp.GetRequiredService<FinancialQuarterService>().EnsureAsync(code, year, quarter, now, ct);
+        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+            c => sp.GetRequiredService<FinancialQuarterService>().EnsureAsync(code, year, quarter, now, c));
 
         var rows = await ReadQuarter(db, code, year, quarter, reportType, ct);
         var buf = new ArrayBufferWriter<byte>();
@@ -46,7 +47,8 @@ public sealed class FinancialReadService(IServiceProvider root, IConfiguration c
         var db = sp.GetRequiredService<StockDataDbContext>();
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
         if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
-        else await sp.GetRequiredService<PerformanceService>().EnsureAsync(code, reportType, start, end, now, ct);
+        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+            c => sp.GetRequiredService<PerformanceService>().EnsureAsync(code, reportType, start, end, now, c));
 
         var rows = await db.FinancialReports.AsNoTracking()
             .Where(r => r.Code == code && r.ReportType == reportType && r.PubDate >= start && r.PubDate <= end)
@@ -88,7 +90,8 @@ public sealed class FinancialReadService(IServiceProvider root, IConfiguration c
                 {
                     var qStart = new DateOnly(year, (quarter - 1) * 3 + 1, 1);
                     if (qStart > end || Coverage.QuarterEnd(year, quarter) < start) continue;
-                    if (!ServeFromPgOnly) await quarterSvc.EnsureAsync(code, year, quarter, now, ct);
+                    await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+                        c => quarterSvc.EnsureAsync(code, year, quarter, now, c));
                     var rows = await ReadQuarter(db, code, year, quarter, null, ct);
                     if (rows.Count == 0) continue;
 

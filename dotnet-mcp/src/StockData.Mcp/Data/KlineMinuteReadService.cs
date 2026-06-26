@@ -18,9 +18,10 @@ public sealed class KlineMinuteReadService(IServiceProvider root, IConfiguration
         var sp = scope.ServiceProvider;
         var db = sp.GetRequiredService<StockDataDbContext>();
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
-        // ServeFromPgOnly：纯 PG 读，仅登记票（分钟数据由显式分钟线同步任务喂，P3）
+        // 方案 A：pgOnly 时登记该票 + 定向高优先有界抓取（分钟数据；全量分钟线仍靠显式 minute 任务）
         if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
-        else await sp.GetRequiredService<KlineMinuteService>().EnsureRangeAsync(code, frequency, start, end, now, ct);
+        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+            c => sp.GetRequiredService<KlineMinuteService>().EnsureRangeAsync(code, frequency, start, end, now, c));
 
         var lo = new DateTimeOffset(start.Year, start.Month, start.Day, 0, 0, 0, TimeSpan.FromHours(8));
         var hi = new DateTimeOffset(end.Year, end.Month, end.Day, 0, 0, 0, TimeSpan.FromHours(8)).AddDays(1);

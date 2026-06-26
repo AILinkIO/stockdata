@@ -31,7 +31,8 @@ public sealed class SnapshotReadService(IServiceProvider root, IConfiguration co
 
         for (var i = 0; i < (allowFallback ? 4 : 1); i++)
         {
-            if (!ServeFromPgOnly) await snaps.EnsureSnapshotAsync(new StockListIngest(db), sd, now, ct);
+            await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+                c => snaps.EnsureSnapshotAsync(new StockListIngest(db), sd, now, c));
             var json = await db.Database.SqlQueryRaw<string>(sql, sd).FirstAsync(ct);
             if (json != "[]" || !allowFallback) return json;
             if (await PreviousTradingDay(sp, sd, now, ServeFromPgOnly, ct) is not DateOnly prev) return json;
@@ -48,7 +49,8 @@ public sealed class SnapshotReadService(IServiceProvider root, IConfiguration co
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
         if (await Resolve(sp, snapDate, now, ServeFromPgOnly, ct) is not DateOnly sd) return "[]";
 
-        if (!ServeFromPgOnly) await sp.GetRequiredService<SnapshotService>().EnsureSnapshotAsync(new IndexConstituentIngest(db, indexCode), sd, now, ct);
+        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+            c => sp.GetRequiredService<SnapshotService>().EnsureSnapshotAsync(new IndexConstituentIngest(db, indexCode), sd, now, c));
 
         const string sql =
             "SELECT COALESCE(json_agg(json_build_object('index_code',t.index_code,'snap_date',t.snap_date," +
@@ -65,7 +67,8 @@ public sealed class SnapshotReadService(IServiceProvider root, IConfiguration co
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
         if (await Resolve(sp, snapDate, now, ServeFromPgOnly, ct) is not DateOnly sd) return "[]";
 
-        if (!ServeFromPgOnly) await sp.GetRequiredService<SnapshotService>().EnsureSnapshotAsync(new IndustryIngest(db), sd, now, ct);
+        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+            c => sp.GetRequiredService<SnapshotService>().EnsureSnapshotAsync(new IndustryIngest(db), sd, now, c));
 
         var sql =
             "SELECT COALESCE(json_agg(json_build_object('snap_date',t.snap_date,'code',t.code,'code_name',t.code_name," +

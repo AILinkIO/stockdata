@@ -29,9 +29,10 @@ public sealed class KlineReadService(IServiceProvider root, IConfiguration confi
         var svc = sp.GetRequiredService<KlineService>();
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
 
-        // ServeFromPgOnly：读纯走 PG，不穿透抓取——仅登记该票，由命令式同步异步喂数（TASK 本轮）
+        // 方案 A：pgOnly 时登记该票（后台 Drainer 全量同步）+ 定向高优先有界抓取（拿到即新鲜，超预算回退 PG）
         if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
-        else await svc.EnsureRangeAsync(code, $"k_{frequency}", start, end, now, ct);
+        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+            c => svc.EnsureRangeAsync(code, $"k_{frequency}", start, end, now, c));
 
         var rows = await db.Klines.AsNoTracking()
             .Where(k => k.Code == code && k.Frequency == frequency
@@ -42,7 +43,8 @@ public sealed class KlineReadService(IServiceProvider root, IConfiguration confi
         // 复权（1 后复权 / 2 前复权）：确保完整因子序列 → 逐 bar 乘因子（不复权 3 直读原始）
         if ((adjustFlag == "1" || adjustFlag == "2") && rows.Count > 0)
         {
-            if (!ServeFromPgOnly) await sp.GetRequiredService<AdjustFactorService>().EnsureFullAsync(code, end, now, ct);
+            await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+                c => sp.GetRequiredService<AdjustFactorService>().EnsureFullAsync(code, end, now, c));
             var factors = await db.AdjustFactors.AsNoTracking()
                 .Where(a => a.Code == code && a.DividOperateDate <= end)
                 .OrderBy(a => a.DividOperateDate)

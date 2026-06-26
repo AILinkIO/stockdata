@@ -18,7 +18,8 @@ public sealed class AdjustFactorReadService(IServiceProvider root, IConfiguratio
         var db = sp.GetRequiredService<StockDataDbContext>();
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
         if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
-        else await sp.GetRequiredService<AdjustFactorService>().EnsureFullAsync(code, end, now, ct);
+        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+            c => sp.GetRequiredService<AdjustFactorService>().EnsureFullAsync(code, end, now, c));
 
         const string sql =
             "SELECT COALESCE(json_agg(json_build_object('code',t.code,'divid_operate_date',t.divid_operate_date," +

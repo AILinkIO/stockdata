@@ -26,7 +26,8 @@ public sealed class StockBasicReadService(IServiceProvider root, IConfiguration 
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
 
         if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
-        else await snap.EnsureSnapshotAsync(new StockBasicIngest(db, code), Coverage.Today(now), now, ct);
+        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+            c => snap.EnsureSnapshotAsync(new StockBasicIngest(db, code), Coverage.Today(now), now, c));
 
         var r = await db.StockBasics.AsNoTracking().FirstOrDefaultAsync(x => x.Code == code, ct);
         return r is null ? "null" : Serialize(r);

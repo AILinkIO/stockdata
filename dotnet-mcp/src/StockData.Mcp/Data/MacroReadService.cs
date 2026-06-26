@@ -18,8 +18,9 @@ public sealed class MacroReadService(IServiceProvider root, IConfiguration confi
         var sp = scope.ServiceProvider;
         var db = sp.GetRequiredService<StockDataDbContext>();
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
-        // 市场级数据（无 code）：ServeFromPgOnly 下纯读，缺口由 /sync/market 补（P2）
-        if (!ServeFromPgOnly) await sp.GetRequiredService<MacroService>().EnsureRangeAsync(kind, start, end, now, ct);
+        // 市场级数据（无 code）：方案 A 下 pgOnly→定向高优先有界抓取(超预算回退 PG)；后台/手动 /sync/market 也会补
+        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+            c => sp.GetRequiredService<MacroService>().EnsureRangeAsync(kind, start, end, now, c));
 
         var table = MacroSpecs.All[kind].Table;
         var sql = $"SELECT COALESCE(json_agg(t ORDER BY t.pub_date), '[]')::text AS \"Value\" " +
@@ -33,7 +34,8 @@ public sealed class MacroReadService(IServiceProvider root, IConfiguration confi
         var sp = scope.ServiceProvider;
         var db = sp.GetRequiredService<StockDataDbContext>();
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
-        if (!ServeFromPgOnly) await sp.GetRequiredService<MacroService>().EnsureRangeAsync("money_supply_month", start, end, now, ct);
+        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+            c => sp.GetRequiredService<MacroService>().EnsureRangeAsync("money_supply_month", start, end, now, c));
 
         const string sql =
             "SELECT COALESCE(json_agg(t ORDER BY t.stat_year, t.stat_month), '[]')::text AS \"Value\" " +
@@ -48,8 +50,8 @@ public sealed class MacroReadService(IServiceProvider root, IConfiguration confi
         var sp = scope.ServiceProvider;
         var db = sp.GetRequiredService<StockDataDbContext>();
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
-        if (!ServeFromPgOnly) await sp.GetRequiredService<MacroService>()
-            .EnsureRangeAsync("money_supply_year", new DateOnly(startYear, 1, 1), new DateOnly(endYear, 12, 31), now, ct);
+        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+            c => sp.GetRequiredService<MacroService>().EnsureRangeAsync("money_supply_year", new DateOnly(startYear, 1, 1), new DateOnly(endYear, 12, 31), now, c));
 
         const string sql =
             "SELECT COALESCE(json_agg(t ORDER BY t.stat_year), '[]')::text AS \"Value\" " +

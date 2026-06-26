@@ -25,7 +25,8 @@ public sealed class DividendReadService(IServiceProvider root, IConfiguration co
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
 
         if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
-        else await svc.EnsureAsync(code, year, yearType, now, ct);
+        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+            c => svc.EnsureAsync(code, year, yearType, now, c));
 
         var rows = await db.Dividends.AsNoTracking()
             .Where(d => d.Code == code && d.Year == (short)year && d.YearType == yearType)
