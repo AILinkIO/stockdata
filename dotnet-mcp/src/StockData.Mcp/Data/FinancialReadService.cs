@@ -17,6 +17,7 @@ public sealed class FinancialReadService(IServiceProvider root, IConfiguration c
     private static readonly JsonWriterOptions Wo = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
     public bool Enabled => config.GetValue<bool>("StockData:PipelineEnabled");
+    private bool ServeFromPgOnly => config.GetValue<bool>("StockData:ServeFromPgOnly");
 
     public async Task<string> GetQuarterlyJsonAsync(string code, int year, int quarter, string? reportType, CancellationToken ct = default)
     {
@@ -24,7 +25,8 @@ public sealed class FinancialReadService(IServiceProvider root, IConfiguration c
         var sp = scope.ServiceProvider;
         var db = sp.GetRequiredService<StockDataDbContext>();
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
-        await sp.GetRequiredService<FinancialQuarterService>().EnsureAsync(code, year, quarter, now, ct);
+        if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
+        else await sp.GetRequiredService<FinancialQuarterService>().EnsureAsync(code, year, quarter, now, ct);
 
         var rows = await ReadQuarter(db, code, year, quarter, reportType, ct);
         var buf = new ArrayBufferWriter<byte>();
@@ -43,7 +45,8 @@ public sealed class FinancialReadService(IServiceProvider root, IConfiguration c
         var sp = scope.ServiceProvider;
         var db = sp.GetRequiredService<StockDataDbContext>();
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
-        await sp.GetRequiredService<PerformanceService>().EnsureAsync(code, reportType, start, end, now, ct);
+        if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
+        else await sp.GetRequiredService<PerformanceService>().EnsureAsync(code, reportType, start, end, now, ct);
 
         var rows = await db.FinancialReports.AsNoTracking()
             .Where(r => r.Code == code && r.ReportType == reportType && r.PubDate >= start && r.PubDate <= end)
@@ -74,6 +77,7 @@ public sealed class FinancialReadService(IServiceProvider root, IConfiguration c
         var db = sp.GetRequiredService<StockDataDbContext>();
         var quarterSvc = sp.GetRequiredService<FinancialQuarterService>();
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
+        if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
 
         var buf = new ArrayBufferWriter<byte>();
         using (var w = new Utf8JsonWriter(buf, Wo))
@@ -84,7 +88,7 @@ public sealed class FinancialReadService(IServiceProvider root, IConfiguration c
                 {
                     var qStart = new DateOnly(year, (quarter - 1) * 3 + 1, 1);
                     if (qStart > end || Coverage.QuarterEnd(year, quarter) < start) continue;
-                    await quarterSvc.EnsureAsync(code, year, quarter, now, ct);
+                    if (!ServeFromPgOnly) await quarterSvc.EnsureAsync(code, year, quarter, now, ct);
                     var rows = await ReadQuarter(db, code, year, quarter, null, ct);
                     if (rows.Count == 0) continue;
 

@@ -9,6 +9,7 @@ namespace StockData.Mcp.Data;
 public sealed class AdjustFactorReadService(IServiceProvider root, IConfiguration config)
 {
     public bool Enabled => config.GetValue<bool>("StockData:PipelineEnabled");
+    private bool ServeFromPgOnly => config.GetValue<bool>("StockData:ServeFromPgOnly");
 
     public async Task<string> GetJsonAsync(string code, DateOnly start, DateOnly end, CancellationToken ct = default)
     {
@@ -16,7 +17,8 @@ public sealed class AdjustFactorReadService(IServiceProvider root, IConfiguratio
         var sp = scope.ServiceProvider;
         var db = sp.GetRequiredService<StockDataDbContext>();
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
-        await sp.GetRequiredService<AdjustFactorService>().EnsureFullAsync(code, end, now, ct);
+        if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
+        else await sp.GetRequiredService<AdjustFactorService>().EnsureFullAsync(code, end, now, ct);
 
         const string sql =
             "SELECT COALESCE(json_agg(json_build_object('code',t.code,'divid_operate_date',t.divid_operate_date," +

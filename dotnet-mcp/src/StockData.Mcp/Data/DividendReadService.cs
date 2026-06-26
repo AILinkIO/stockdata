@@ -14,6 +14,7 @@ namespace StockData.Mcp.Data;
 public sealed class DividendReadService(IServiceProvider root, IConfiguration config)
 {
     public bool Enabled => config.GetValue<bool>("StockData:PipelineEnabled");
+    private bool ServeFromPgOnly => config.GetValue<bool>("StockData:ServeFromPgOnly");
 
     public async Task<string> GetJsonAsync(string code, int year, string yearType, CancellationToken ct = default)
     {
@@ -23,7 +24,8 @@ public sealed class DividendReadService(IServiceProvider root, IConfiguration co
         var svc = sp.GetRequiredService<DividendService>();
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
 
-        await svc.EnsureAsync(code, year, yearType, now, ct);
+        if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
+        else await svc.EnsureAsync(code, year, yearType, now, ct);
 
         var rows = await db.Dividends.AsNoTracking()
             .Where(d => d.Code == code && d.Year == (short)year && d.YearType == yearType)

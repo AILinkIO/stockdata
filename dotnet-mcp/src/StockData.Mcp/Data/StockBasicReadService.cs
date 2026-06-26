@@ -15,6 +15,7 @@ namespace StockData.Mcp.Data;
 public sealed class StockBasicReadService(IServiceProvider root, IConfiguration config)
 {
     public bool Enabled => config.GetValue<bool>("StockData:PipelineEnabled");
+    private bool ServeFromPgOnly => config.GetValue<bool>("StockData:ServeFromPgOnly");
 
     public async Task<string> GetJsonAsync(string code, CancellationToken ct = default)
     {
@@ -24,7 +25,8 @@ public sealed class StockBasicReadService(IServiceProvider root, IConfiguration 
         var snap = sp.GetRequiredService<SnapshotService>();
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
 
-        await snap.EnsureSnapshotAsync(new StockBasicIngest(db, code), Coverage.Today(now), now, ct);
+        if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
+        else await snap.EnsureSnapshotAsync(new StockBasicIngest(db, code), Coverage.Today(now), now, ct);
 
         var r = await db.StockBasics.AsNoTracking().FirstOrDefaultAsync(x => x.Code == code, ct);
         return r is null ? "null" : Serialize(r);

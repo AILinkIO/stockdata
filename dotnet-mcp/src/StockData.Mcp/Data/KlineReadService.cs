@@ -18,6 +18,7 @@ namespace StockData.Mcp.Data;
 public sealed class KlineReadService(IServiceProvider root, IConfiguration config)
 {
     public bool Enabled => config.GetValue<bool>("StockData:PipelineEnabled");
+    private bool ServeFromPgOnly => config.GetValue<bool>("StockData:ServeFromPgOnly");
 
     public async Task<string> GetHistoricalJsonAsync(
         string code, string frequency, DateOnly start, DateOnly end, string adjustFlag, CancellationToken ct = default)
@@ -28,7 +29,9 @@ public sealed class KlineReadService(IServiceProvider root, IConfiguration confi
         var svc = sp.GetRequiredService<KlineService>();
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
 
-        await svc.EnsureRangeAsync(code, $"k_{frequency}", start, end, now, ct);
+        // ServeFromPgOnly：读纯走 PG，不穿透抓取——仅登记该票，由命令式同步异步喂数（TASK 本轮）
+        if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
+        else await svc.EnsureRangeAsync(code, $"k_{frequency}", start, end, now, ct);
 
         var rows = await db.Klines.AsNoTracking()
             .Where(k => k.Code == code && k.Frequency == frequency
@@ -39,7 +42,7 @@ public sealed class KlineReadService(IServiceProvider root, IConfiguration confi
         // 复权（1 后复权 / 2 前复权）：确保完整因子序列 → 逐 bar 乘因子（不复权 3 直读原始）
         if ((adjustFlag == "1" || adjustFlag == "2") && rows.Count > 0)
         {
-            await sp.GetRequiredService<AdjustFactorService>().EnsureFullAsync(code, end, now, ct);
+            if (!ServeFromPgOnly) await sp.GetRequiredService<AdjustFactorService>().EnsureFullAsync(code, end, now, ct);
             var factors = await db.AdjustFactors.AsNoTracking()
                 .Where(a => a.Code == code && a.DividOperateDate <= end)
                 .OrderBy(a => a.DividOperateDate)
