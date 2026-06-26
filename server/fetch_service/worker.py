@@ -149,6 +149,15 @@ def _loop(store: JobStore, stop: threading.Event) -> None:
             job_id = store.next_pending(timeout=5)
             if job_id:
                 _run_job(store, job_id, stop)
+            elif provider.should_idle_logout(settings.fetch_idle_logout_seconds):
+                # 空闲超阈值：主动登出释放 socket，避免下次复用服务端已断连接报 10002007。
+                # 用 Watchdog 兜底 bs.logout 在僵死 socket 上的 recv 空转死循环。
+                try:
+                    with Watchdog(threading.get_ident(), settings.baostock_socket_timeout + 5):
+                        provider.idle_logout()
+                except WatchdogTimeout:
+                    logger.warning("空闲登出超时（socket 僵死），强制丢弃连接")
+                    provider.reset_login_state()
         except Exception:  # noqa: BLE001
             logger.exception("worker 循环异常，继续")
             time.sleep(1)
