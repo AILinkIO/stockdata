@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     baostock_socket_timeout: int = 30  # baostock TCP 超时：挂死靠它快速失败重连
 
     # ── 限流（防 IP 拉黑）──
-    fetch_rate_limit_per_minute: int = 60   # 每分钟最多向 baostock 发起的查询次数，<=0 关闭
+    fetch_rate_limit_per_minute: int = 90   # 每分钟最多向 baostock 发起的查询次数，<=0 关闭
     rate_limit_backend: str = "redis"        # memory（进程内）或 redis（跨进程）
     rate_limit_redis_url: str = "redis://127.0.0.1:6379/1"  # 限流 Redis（独立 DB）
 

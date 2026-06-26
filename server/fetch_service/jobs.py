@@ -23,7 +23,8 @@ import redis
 RESULT_TTL = 600     # 完成态 job + payload + dedup 索引留存（沿用旧 result_expires）
 INFLIGHT_TTL = 1200  # 在途 job 安全 TTL / 僵尸阈值（沿用旧 _STALE_RUNNING）
 
-_PENDING_KEY = "fetch:pending"
+_PENDING_KEY = "fetch:pending"             # 低优先（cron 后台全量同步）
+_PENDING_HIGH_KEY = "fetch:pending:high"   # 高优先（MCP 交互读触发的定向抓取，插队）
 _HALTED_KEY = "fetch:halted"  # 抓取暂停标志（baostock 拉黑），持久无 TTL，仅 /restart 清除
 
 
@@ -43,8 +44,9 @@ class JobStore:
 
     # ── 提交 / 去重 ──
 
-    def submit(self, task_type: str, params: dict) -> tuple[str, str, bool]:
-        """返回 (job_id, status, dedup)。同参数在飞/未过期 → 复用既有 job。"""
+    def submit(self, task_type: str, params: dict, priority: str = "low") -> tuple[str, str, bool]:
+        """返回 (job_id, status, dedup)。同参数在飞/未过期 → 复用既有 job。
+        priority="high"（MCP 交互读，插队）/ "low"（后台全量同步）。"""
         h = params_hash(task_type, params)
         idx_key = f"job:idx:{h}"
         new_id = uuid.uuid4().hex
@@ -60,7 +62,7 @@ class JobStore:
                 "created_at": now,
             })
             self._r.expire(f"job:{new_id}", INFLIGHT_TTL)
-            self._r.lpush(_PENDING_KEY, new_id)
+            self._r.lpush(_PENDING_HIGH_KEY if priority == "high" else _PENDING_KEY, new_id)
             return new_id, "pending", False
 
         # 已存在：返回既有 job_id 与当前状态（搭车）
@@ -87,7 +89,8 @@ class JobStore:
     # ── worker 侧 ──
 
     def next_pending(self, timeout: int = 5) -> str | None:
-        res = self._r.brpop(_PENDING_KEY, timeout=timeout)
+        # 按优先序阻塞弹出：高优先队列非空则先取（BRPOP 多 key 返回首个非空者）
+        res = self._r.brpop([_PENDING_HIGH_KEY, _PENDING_KEY], timeout=timeout)
         return res[1] if res else None
 
     def task_of(self, job_id: str) -> tuple[str, dict] | None:

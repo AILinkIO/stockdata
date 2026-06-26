@@ -42,6 +42,7 @@ _store = JobStore()
 class FetchRequest(BaseModel):
     type: str
     params: dict
+    priority: str = "low"   # high（MCP 交互读，插队）/ low（后台全量同步）
 
 
 @asynccontextmanager
@@ -63,7 +64,7 @@ app = FastAPI(title="stockdata-fetch", lifespan=lifespan)
 
 @app.post("/fetch", status_code=202)
 def submit(req: FetchRequest, response: Response):
-    job_id, status, dedup = _store.submit(req.type, req.params)
+    job_id, status, dedup = _store.submit(req.type, req.params, req.priority)
     return {"job_id": job_id, "status": status, "dedup": dedup}
 
 
