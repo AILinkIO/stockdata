@@ -38,10 +38,12 @@ public static class ServiceCollectionExtensions
         services.AddScoped<PerformanceService>();
         services.TryAddSingleton(TimeProvider.System);
 
-        // 命令式同步编排（P2）：单例，各自建 scope（仅管线开启时注册，端点据此 503 判活）
+        // 命令式同步编排：单例，各自建 scope（仅管线开启时注册，端点据此 503 判活）
         services.AddSingleton<StockSyncService>();
         services.AddSingleton<SyncMarketService>();
         services.AddSingleton<SyncRunService>();
+        // 常驻消费者（方案 A）：唯一串行驱动 baostock 的后台 worker
+        services.AddHostedService<SyncDrainer>();
 
         services.AddSingleton(new FetchClientOptions
         {
