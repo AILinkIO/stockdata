@@ -61,9 +61,12 @@ app.MapPost("/sync/stock", async (HttpContext http, string code, bool? minute, C
 {
     var sync = http.RequestServices.GetService<StockSyncService>();
     if (sync is null) return Results.Json(new { error = "pipeline disabled (StockData:PipelineEnabled=false)" }, statusCode: 503);
-    if (minute == true) return Results.Json(new { error = "分钟线同步任务待 P3 实现" }, statusCode: 501);
     if (string.IsNullOrWhiteSpace(code)) return Results.Json(new { error = "缺少 code" }, statusCode: 400);
-    return Results.Json(await sync.SyncStockAsync(CodeNormalizer.ToBaostock(code), ct));
+    var norm = CodeNormalizer.ToBaostock(code);
+    // minute=true：分钟线全历史（k_5/15/30/60）；否则全数据集
+    return Results.Json(minute == true
+        ? await sync.SyncMinuteAsync(norm, ct)
+        : await sync.SyncStockAsync(norm, ct));
 });
 // 批量续传：POST /sync/run?max=200（扫 pending/partial/过期票，逐票续传，遇 halt 即停）
 app.MapPost("/sync/run", async (HttpContext http, int? max, CancellationToken ct) =>
