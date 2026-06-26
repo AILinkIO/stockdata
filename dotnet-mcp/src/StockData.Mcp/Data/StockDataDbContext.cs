@@ -29,6 +29,8 @@ public class StockDataDbContext(DbContextOptions<StockDataDbContext> options) : 
     public DbSet<RequiredReserveRatio> RequiredReserveRatios => Set<RequiredReserveRatio>();
     public DbSet<MoneySupplyMonth> MoneySupplyMonths => Set<MoneySupplyMonth>();
     public DbSet<MoneySupplyYear> MoneySupplyYears => Set<MoneySupplyYear>();
+    public DbSet<SyncedStock> SyncedStocks => Set<SyncedStock>();
+    public DbSet<StockSyncTask> StockSyncTasks => Set<StockSyncTask>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
