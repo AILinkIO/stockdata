@@ -6,8 +6,9 @@ namespace StockData.Mcp.Fetching;
 
 public sealed class FetchClientOptions
 {
-    /// <summary>读穿透等待超时（秒），沿用 Python fetch_wait_timeout 语义。</summary>
-    public int WaitTimeoutSeconds { get; set; } = 120;
+    /// <summary>单次抓取等待上限（秒）。默认对齐 watchdog 硬超时（600s），避免慢查询被提前判超时；
+    /// MCP 交互读另用更短的 CancellationToken 预算来做有界等待。</summary>
+    public int WaitTimeoutSeconds { get; set; } = 600;
 
     /// <summary>轮询间隔（毫秒），沿用旧 _POLL_INTERVAL=0.5s。</summary>
     public int PollIntervalMs { get; set; } = 500;
@@ -30,7 +31,7 @@ public sealed class HttpFetchClient(HttpClient http, FetchClientOptions options,
     public async Task<FetchPayload> FetchAsync(FetchRequest request, CancellationToken ct = default)
     {
         var submit = await http.PostAsJsonAsync("/fetch",
-            new { type = request.Type, @params = request.ToParams() }, Json, ct);
+            new { type = request.Type, @params = request.ToParams(), priority = FetchPriority.IsHigh ? "high" : "low" }, Json, ct);
         submit.EnsureSuccessStatusCode();
         var job = await submit.Content.ReadFromJsonAsync<FetchSubmitResponse>(Json, ct)
                   ?? throw new FetchFailedException("POST /fetch 返回空");
