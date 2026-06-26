@@ -12,6 +12,7 @@ public sealed class TradingDaysReadService(IServiceProvider root, IConfiguration
     private const int Lookback = 45;
 
     public bool Enabled => config.GetValue<bool>("StockData:PipelineEnabled");
+    private bool ServeFromPgOnly => config.GetValue<bool>("StockData:ServeFromPgOnly");
 
     private async Task<List<DateOnly>> TradingDaysAsync(DateOnly start, DateOnly end, CancellationToken ct)
     {
@@ -19,7 +20,8 @@ public sealed class TradingDaysReadService(IServiceProvider root, IConfiguration
         var sp = scope.ServiceProvider;
         var db = sp.GetRequiredService<StockDataDbContext>();
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
-        await sp.GetRequiredService<TradeCalendarService>().EnsureRangeAsync(start, end, now, ct);
+        // 市场级（日历）：ServeFromPgOnly 下纯读，由 /sync/market 保新鲜（P2）
+        if (!ServeFromPgOnly) await sp.GetRequiredService<TradeCalendarService>().EnsureRangeAsync(start, end, now, ct);
         return await db.TradeCalendars.AsNoTracking()
             .Where(c => c.CalendarDate >= start && c.CalendarDate <= end && c.IsTradingDay)
             .OrderBy(c => c.CalendarDate).Select(c => c.CalendarDate).ToListAsync(ct);

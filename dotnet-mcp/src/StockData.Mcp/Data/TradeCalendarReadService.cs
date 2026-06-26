@@ -14,6 +14,7 @@ namespace StockData.Mcp.Data;
 public sealed class TradeCalendarReadService(IServiceProvider root, IConfiguration config)
 {
     public bool Enabled => config.GetValue<bool>("StockData:PipelineEnabled");
+    private bool ServeFromPgOnly => config.GetValue<bool>("StockData:ServeFromPgOnly");
 
     public async Task<string> GetJsonAsync(DateOnly start, DateOnly end, CancellationToken ct = default)
     {
@@ -23,7 +24,8 @@ public sealed class TradeCalendarReadService(IServiceProvider root, IConfigurati
         var svc = sp.GetRequiredService<TradeCalendarService>();
         var time = sp.GetRequiredService<TimeProvider>();
 
-        await svc.EnsureRangeAsync(start, end, time.GetUtcNow(), ct);
+        // 市场级（日历）：ServeFromPgOnly 下纯读，由 /sync/market 保新鲜（P2）
+        if (!ServeFromPgOnly) await svc.EnsureRangeAsync(start, end, time.GetUtcNow(), ct);
 
         var rows = await db.TradeCalendars.AsNoTracking()
             .Where(c => c.CalendarDate >= start && c.CalendarDate <= end)

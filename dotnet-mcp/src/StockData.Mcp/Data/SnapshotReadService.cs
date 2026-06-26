@@ -10,6 +10,8 @@ namespace StockData.Mcp.Data;
 public sealed class SnapshotReadService(IServiceProvider root, IConfiguration config)
 {
     public bool Enabled => config.GetValue<bool>("StockData:PipelineEnabled");
+    // 快照三件套均为市场级数据（无单票 code），ServeFromPgOnly 下纯读，缺口由 /sync/market 补（P2）
+    private bool ServeFromPgOnly => config.GetValue<bool>("StockData:ServeFromPgOnly");
 
     public async Task<string> StockListJsonAsync(DateOnly? snapDate, CancellationToken ct = default)
     {
@@ -20,7 +22,7 @@ public sealed class SnapshotReadService(IServiceProvider root, IConfiguration co
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
 
         var allowFallback = snapDate is null;
-        if (await Resolve(sp, snapDate, now, ct) is not DateOnly sd) return "[]";
+        if (await Resolve(sp, snapDate, now, ServeFromPgOnly, ct) is not DateOnly sd) return "[]";
 
         const string sql =
             "SELECT COALESCE(json_agg(json_build_object('snap_date',t.snap_date,'code',t.code," +
@@ -29,10 +31,10 @@ public sealed class SnapshotReadService(IServiceProvider root, IConfiguration co
 
         for (var i = 0; i < (allowFallback ? 4 : 1); i++)
         {
-            await snaps.EnsureSnapshotAsync(new StockListIngest(db), sd, now, ct);
+            if (!ServeFromPgOnly) await snaps.EnsureSnapshotAsync(new StockListIngest(db), sd, now, ct);
             var json = await db.Database.SqlQueryRaw<string>(sql, sd).FirstAsync(ct);
             if (json != "[]" || !allowFallback) return json;
-            if (await PreviousTradingDay(sp, sd, now, ct) is not DateOnly prev) return json;
+            if (await PreviousTradingDay(sp, sd, now, ServeFromPgOnly, ct) is not DateOnly prev) return json;
             sd = prev;
         }
         return "[]";
@@ -44,9 +46,9 @@ public sealed class SnapshotReadService(IServiceProvider root, IConfiguration co
         var sp = scope.ServiceProvider;
         var db = sp.GetRequiredService<StockDataDbContext>();
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
-        if (await Resolve(sp, snapDate, now, ct) is not DateOnly sd) return "[]";
+        if (await Resolve(sp, snapDate, now, ServeFromPgOnly, ct) is not DateOnly sd) return "[]";
 
-        await sp.GetRequiredService<SnapshotService>().EnsureSnapshotAsync(new IndexConstituentIngest(db, indexCode), sd, now, ct);
+        if (!ServeFromPgOnly) await sp.GetRequiredService<SnapshotService>().EnsureSnapshotAsync(new IndexConstituentIngest(db, indexCode), sd, now, ct);
 
         const string sql =
             "SELECT COALESCE(json_agg(json_build_object('index_code',t.index_code,'snap_date',t.snap_date," +
@@ -61,9 +63,9 @@ public sealed class SnapshotReadService(IServiceProvider root, IConfiguration co
         var sp = scope.ServiceProvider;
         var db = sp.GetRequiredService<StockDataDbContext>();
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
-        if (await Resolve(sp, snapDate, now, ct) is not DateOnly sd) return "[]";
+        if (await Resolve(sp, snapDate, now, ServeFromPgOnly, ct) is not DateOnly sd) return "[]";
 
-        await sp.GetRequiredService<SnapshotService>().EnsureSnapshotAsync(new IndustryIngest(db), sd, now, ct);
+        if (!ServeFromPgOnly) await sp.GetRequiredService<SnapshotService>().EnsureSnapshotAsync(new IndustryIngest(db), sd, now, ct);
 
         var sql =
             "SELECT COALESCE(json_agg(json_build_object('snap_date',t.snap_date,'code',t.code,'code_name',t.code_name," +
@@ -74,22 +76,22 @@ public sealed class SnapshotReadService(IServiceProvider root, IConfiguration co
             : await db.Database.SqlQueryRaw<string>(sql, sd, code).FirstAsync(ct);
     }
 
-    // snap_date 缺省 → 最近交易日（≤今天）；显式给定则原样
-    private static async Task<DateOnly?> Resolve(IServiceProvider sp, DateOnly? snapDate, DateTimeOffset now, CancellationToken ct)
+    // snap_date 缺省 → 最近交易日（≤今天）；显式给定则原样。pgOnly 下不补日历（靠 /sync/market）
+    private static async Task<DateOnly?> Resolve(IServiceProvider sp, DateOnly? snapDate, DateTimeOffset now, bool pgOnly, CancellationToken ct)
     {
         if (snapDate is DateOnly d) return d;
         var db = sp.GetRequiredService<StockDataDbContext>();
         var today = Coverage.Today(now);
-        await sp.GetRequiredService<TradeCalendarService>().EnsureRangeAsync(today.AddDays(-45), today, now, ct);
+        if (!pgOnly) await sp.GetRequiredService<TradeCalendarService>().EnsureRangeAsync(today.AddDays(-45), today, now, ct);
         return await db.TradeCalendars.AsNoTracking()
             .Where(c => c.CalendarDate <= today && c.IsTradingDay)
             .OrderByDescending(c => c.CalendarDate).Select(c => (DateOnly?)c.CalendarDate).FirstOrDefaultAsync(ct);
     }
 
-    private static async Task<DateOnly?> PreviousTradingDay(IServiceProvider sp, DateOnly d, DateTimeOffset now, CancellationToken ct)
+    private static async Task<DateOnly?> PreviousTradingDay(IServiceProvider sp, DateOnly d, DateTimeOffset now, bool pgOnly, CancellationToken ct)
     {
         var db = sp.GetRequiredService<StockDataDbContext>();
-        await sp.GetRequiredService<TradeCalendarService>().EnsureRangeAsync(d.AddDays(-45), d.AddDays(-1), now, ct);
+        if (!pgOnly) await sp.GetRequiredService<TradeCalendarService>().EnsureRangeAsync(d.AddDays(-45), d.AddDays(-1), now, ct);
         return await db.TradeCalendars.AsNoTracking()
             .Where(c => c.CalendarDate < d && c.IsTradingDay)
             .OrderByDescending(c => c.CalendarDate).Select(c => (DateOnly?)c.CalendarDate).FirstOrDefaultAsync(ct);
