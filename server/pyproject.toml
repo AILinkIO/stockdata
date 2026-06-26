@@ -3,7 +3,7 @@ name = "stockdata"
 version = "1.0.0"
 description = "无状态 baostock 抓取微服务（fetch_service）：HTTP 抓取 + 限流，数据落盘由 dotnet 负责"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.13,<3.14"
 dependencies = [
     "baostock>=0.9.2",
     "fastapi>=0.136.3",
