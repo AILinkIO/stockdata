@@ -29,7 +29,6 @@ public sealed class KlineWriter(StockDataDbContext db) : IKlineWriter
         var rows = KlineParser.ToKlines(payload, code, frequency);
         var actualLast = KlineParser.MaxDate(payload);
         var today = Coverage.Today(now);
-        var lastDate = Coverage.ClaimableLast(dataType, sliceEnd, actualLast, today);
 
         await using var tx = await db.Database.BeginTransactionAsync(ct);
 
@@ -40,7 +39,23 @@ public sealed class KlineWriter(StockDataDbContext db) : IKlineWriter
             written += await UpsertChunkAsync(chunk, ct);
         }
 
-        await UpsertWatermarkAsync(code, dataType, sliceStart, lastDate, ct);
+        // 空 payload(baostock 停牌/退市期返回 NoDataFoundError → worker 标 done 空 payload):
+        // 只心跳更新 last_fetched_at,不推进水位。旧行为会经 ClaimableLast(null) 虚报到
+        // SettledBoundary,造成"声明覆盖但实际无数据"的永久空洞
+        // (2026-06-27 实测 sz.000584 k_d 虚报 350 天:wm=2026-06-25 但实际数据停在 2025-07-10)。
+        // UPDATE 不存在行 affected=0 不报错;首次触达且空 → 不建水位,下次 Coverage 判首次触达重抓。
+        if (actualLast is DateOnly a)
+        {
+            var lastDate = Coverage.ClaimableLast(dataType, sliceEnd, a, today);
+            await UpsertWatermarkAsync(code, dataType, sliceStart, lastDate, ct);
+        }
+        else
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "UPDATE data_watermark SET last_fetched_at = now() WHERE code = @code AND data_type = @dt",
+                new NpgsqlParameter("code", code), new NpgsqlParameter("dt", dataType));
+        }
+
         await tx.CommitAsync(ct);
         return written;
     }

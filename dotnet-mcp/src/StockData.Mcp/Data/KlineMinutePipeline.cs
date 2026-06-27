@@ -54,7 +54,8 @@ public sealed class KlineMinuteWriter(StockDataDbContext db) : IKlineMinuteWrite
         DateOnly sliceStart, DateOnly sliceEnd, DateTimeOffset now, CancellationToken ct = default)
     {
         var rows = KlineMinuteParser.Parse(payload, code, frequency);
-        var last = Coverage.ClaimableLast(dataType, sliceEnd, KlineMinuteParser.MaxDate(rows), Coverage.Today(now));
+        var actualLast = KlineMinuteParser.MaxDate(rows);
+        var today = Coverage.Today(now);
 
         await using var tx = await db.Database.BeginTransactionAsync(ct);
 
@@ -62,17 +63,28 @@ public sealed class KlineMinuteWriter(StockDataDbContext db) : IKlineMinuteWrite
         for (var i = 0; i < rows.Count; i += Chunk)
             written += await UpsertChunkAsync(rows.GetRange(i, Math.Min(Chunk, rows.Count - i)), ct);
 
-        await db.Database.ExecuteSqlRawAsync(
-            """
-            INSERT INTO data_watermark (code,data_type,first_date,last_date,last_fetched_at)
-            VALUES (@code,@dt,@first,@last,now())
-            ON CONFLICT (code,data_type) DO UPDATE SET
-                first_date = LEAST(data_watermark.first_date, EXCLUDED.first_date),
-                last_date  = GREATEST(data_watermark.last_date, EXCLUDED.last_date),
-                last_fetched_at = now()
-            """,
-            new NpgsqlParameter("code", code), new NpgsqlParameter("dt", dataType),
-            new NpgsqlParameter("first", sliceStart), new NpgsqlParameter("last", last));
+        // 空 payload 只心跳不推进水位(同 KlineWriter,详见 F1 修复说明)
+        if (actualLast is DateOnly a)
+        {
+            var last = Coverage.ClaimableLast(dataType, sliceEnd, a, today);
+            await db.Database.ExecuteSqlRawAsync(
+                """
+                INSERT INTO data_watermark (code,data_type,first_date,last_date,last_fetched_at)
+                VALUES (@code,@dt,@first,@last,now())
+                ON CONFLICT (code,data_type) DO UPDATE SET
+                    first_date = LEAST(data_watermark.first_date, EXCLUDED.first_date),
+                    last_date  = GREATEST(data_watermark.last_date, EXCLUDED.last_date),
+                    last_fetched_at = now()
+                """,
+                new NpgsqlParameter("code", code), new NpgsqlParameter("dt", dataType),
+                new NpgsqlParameter("first", sliceStart), new NpgsqlParameter("last", last));
+        }
+        else
+        {
+            await db.Database.ExecuteSqlRawAsync(
+                "UPDATE data_watermark SET last_fetched_at = now() WHERE code = @code AND data_type = @dt",
+                new NpgsqlParameter("code", code), new NpgsqlParameter("dt", dataType));
+        }
 
         await tx.CommitAsync(ct);
         return written;
