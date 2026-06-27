@@ -27,25 +27,40 @@ public sealed class KlineReadService(IServiceProvider root, IConfiguration confi
         await using var scope = root.CreateAsyncScope();
         var sp = scope.ServiceProvider;
         var db = sp.GetRequiredService<StockDataDbContext>();
-        var svc = sp.GetRequiredService<KlineService>();
-        var watermarks = sp.GetRequiredService<IWatermarkStore>();
         var tp = sp.GetRequiredService<TimeProvider>();
         var now = tp.GetUtcNow();
 
         // 方案 A：pgOnly 时登记该票（后台 Drainer 全量同步）+ 水位检查（Fresh→返回/有数据→返回stale/无数据→等Drainer）
         if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
 
-        // 复权（1 后复权 / 2 前复权）：K 线与 AdjustFactor 的水位检查**并行**（pgOnly 模式下均为纯水位查询，无 fetch）
         var needAdjust = adjustFlag == "1" || adjustFlag == "2";
-        var klineTask = SyncAwaiter.EnsureAsync(config, ServeFromPgOnly, logger, tp, ct,
-            SyncAwaiter.RangeCheck(watermarks, code, $"k_{frequency}", start, end, now),
-            c => svc.EnsureRangeAsync(code, $"k_{frequency}", start, end, now, c));
-        var factorTask = needAdjust
-            ? SyncAwaiter.EnsureAsync(config, ServeFromPgOnly, logger, tp, ct,
-                SyncAwaiter.AdjustFactorCheck(watermarks, db, code, now),
-                c => sp.GetRequiredService<AdjustFactorService>().EnsureFullAsync(code, end, now, c))
-            : Task.CompletedTask;
-        await Task.WhenAll(klineTask, factorTask);
+
+        // K 线与 AdjustFactor 的水位检查/补抓并行执行。DbContext 非线程安全：同一 scope 的实例
+        // 不能被并发操作（EF Core 会抛 InvalidOperationException: a second operation was started
+        // on this context instance）。故两条路径各自建独立 scope（独立 DbContext 实例）；
+        // 主 scope 的 db 仅用于上面的懒登记与下方 WhenAll 之后的串行读取。
+        async Task EnsureKlineAsync()
+        {
+            await using var s = root.CreateAsyncScope();
+            var ssp = s.ServiceProvider;
+            await SyncAwaiter.EnsureAsync(config, ServeFromPgOnly, logger, tp, ct,
+                SyncAwaiter.RangeCheck(ssp.GetRequiredService<IWatermarkStore>(),
+                    code, $"k_{frequency}", start, end, now),
+                c => ssp.GetRequiredService<KlineService>()
+                    .EnsureRangeAsync(code, $"k_{frequency}", start, end, now, c));
+        }
+        async Task EnsureFactorAsync()
+        {
+            await using var s = root.CreateAsyncScope();
+            var ssp = s.ServiceProvider;
+            await SyncAwaiter.EnsureAsync(config, ServeFromPgOnly, logger, tp, ct,
+                SyncAwaiter.AdjustFactorCheck(ssp.GetRequiredService<IWatermarkStore>(),
+                    ssp.GetRequiredService<StockDataDbContext>(), code, now),
+                c => ssp.GetRequiredService<AdjustFactorService>().EnsureFullAsync(code, end, now, c));
+        }
+
+        if (needAdjust) await Task.WhenAll(EnsureKlineAsync(), EnsureFactorAsync());
+        else await EnsureKlineAsync();
 
         var rows = await db.Klines.AsNoTracking()
             .Where(k => k.Code == code && k.Frequency == frequency
