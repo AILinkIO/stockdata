@@ -16,7 +16,8 @@ namespace StockData.Mcp.Data;
 /// </summary>
 public sealed class SyncDrainer(
     IServiceProvider root, IConfiguration config, ILogger<SyncDrainer> logger,
-    StockSyncService stockSync, SyncMarketService market, IFetchControl control) : BackgroundService
+    StockSyncService stockSync, SyncMarketService market, IFetchControl control,
+    SyncWakeUp wakeUp) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
@@ -41,7 +42,12 @@ public sealed class SyncDrainer(
                 if (now - lastMarket > marketEvery) { await market.SyncMarketAsync(ct); lastMarket = now; }
 
                 var next = await NextDueAsync(ct);
-                if (next is null) { await Task.Delay(idle, ct); continue; }
+                if (next is null)
+                {
+                    // 等待唤醒信号（RegisterIfNew 触发）或 idle 超时（/sync/refresh 等不经 RegisterIfNew 的路径）
+                    await Task.WhenAny(wakeUp.WaitAsync(ct).AsTask(), Task.Delay(idle, ct));
+                    continue;
+                }
 
                 var o = next.Value.Kind == "minute"
                     ? await stockSync.SyncMinuteAsync(next.Value.Code, ct)

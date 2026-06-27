@@ -39,6 +39,9 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton(TimeProvider.System);
 
         // 命令式同步编排：单例，各自建 scope（仅管线开启时注册，端点据此 503 判活）
+        var wakeUp = new SyncWakeUp();
+        services.AddSingleton(wakeUp);
+        SyncRegistry.Configure(wakeUp);
         services.AddSingleton<StockSyncService>();
         services.AddSingleton<SyncMarketService>();
         services.AddSingleton<SyncRunService>();
