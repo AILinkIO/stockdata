@@ -136,6 +136,98 @@
 - `dotnet build` 0 error、`dotnet test` 162/162。**未部署**（dotnet 重建不碰 baostock；但 fetch 重建=新 bs.login，
   两者一起部署时机交 David，§0）。
 
+## P4. MCP "数据拿不到" 诊断与修复（2026-06-27，进行中）
+
+> 来源：用户反馈 MCP 经常拿不到数据，怀疑与"边界性抓取"有关。经 analyze-mode 全面排查，
+> 定位到 5 层边界叠加 + 1 个真 bug + 多个设计代价。修复按 ROI 排序逐条进行。
+
+### 0. 诊断证据（PG 实测，2026-06-27）
+
+**🔴 真 bug — 水位虚报（3/4 k_m 票受害）**：
+```sql
+SELECT code, wm.last_date AS wm_last, (SELECT MAX(trade_date) FROM kline WHERE code=wm.code AND frequency='m') AS actual_max
+FROM data_watermark wm WHERE data_type='k_m';
+ sh.600028 | wm_last=2026-05-31 | actual_max=2026-05-29 | 虚报 2 天
+ sh.600050 | wm_last=2026-05-31 | actual_max=2026-05-29 | 虚报 2 天
+ sz.002463 | wm_last=2026-05-31 | actual_max=2026-05-29 | 虚报 2 天
+```
+
+机制（`Coverage.ClaimableLast`）：
+```csharp
+var claimed = Min(requestedEnd, SettledBoundary(dataType, today));  // k_m → 5/31
+if (actualLast is DateOnly a && a > claimed) claimed = a;            // 5/29 < 5/31,不变
+return claimed;                                                     // 声明覆盖到 5/31,但实际只到 5/29
+```
+baostock 偶发漏数据（5/30、5/31 是周末/月底，本应无交易日或 baostock 漏）；ClaimableLast
+按"定型区一定有数据"假设虚报；`Coverage.CheckRange` 后续 `end ≤ wm.LastDate` 判 Fresh 永不补抓 → **永久空洞**。
+
+**🟡 设计代价（预期）**：
+- `ReadFetchBudgetSeconds=30s` 高优先有界等待，超时吞异常回退 PG（不挂死、不报错）
+- `Coverage.CheckRange` 未定型区 5 分钟节流：`gapUnsettledOnly && !stale` 时不补尾部
+- `RangeSlicer` k_d/w/m 切 3650 天/段，全史回填 7+ 段串行，30s 内抓不完
+- halt 期间 worker 不消费，交互读静默回退
+- 复权路径 K线 + 因子两次串行 `ReadFetch.EnsureAsync`，几乎必超时
+- 工具 `IsError=False` 但数据空（异常被吞，用户无感）
+
+**🟢 数据脏**：
+```
+sh.600050 k_m first_date=1962-01-08（早于 A股 epoch 1990-12-19，来源：历史某次 MCP 客户端误传 start）
+first_date = LEAST(existing, new) → 永久 stuck
+```
+
+**🟢 工具调用观测**：12h 内 22 次 MCP 工具调用全部 `IsError=False`（吞异常路径无可见性）。
+
+### 1. 修复清单（按 ROI 排序）
+
+- ✅ **F1 水位虚报根因（真 bug）** — `Coverage.ClaimableLast` 改为：有 actualLast 时严格按 actualLast
+  声明（不虚报）；无 actualLast 时（合法空：复权因子无事件/财报未披露）维持 cap 推进防重抓。
+  - 文件：`Coverage/Coverage.cs` + `CoverageTests.cs` 加 case `test_claim_actual_below_boundary_not_overclaimed`
+  - 影响面：所有 `KlineWriter` / `KlineMinuteWriter` 落盘路径（K 线类）；不动 `AdjustFactorWriter` /
+    `FinancialWriter`（这两类合法空仍走 cap 推进，符合设计）
+  - 扩展：`KlineWriter` / `KlineMinuteWriter` 在 payload 为空时（baostock 停牌期返回 NoDataFoundError）
+    只心跳更新 `last_fetched_at`，不推进水位——否则仍会经 ClaimableLast(null) 虚报
+    （实测 sz.000584 k_d 虚报 350 天）
+  - 副作用：actualLast<cap 时水位回退，下次 `CheckRange` 会判 stale 触发重抓（设计期望，覆盖空洞）
+
+- ✅ **F2 清洗 PG 脏水位** — 1 条 first_date（sh.600050 k_m: 1962-01-08 → 1990-12-19）
+  + 7 条 last_date 虚报回退到实际 max(trade_date)。备份在 `data_watermark_backup_p4`。
+
+- ✅ **F3 ReadFetch 吞异常路径加日志** — `Data/ReadFetch.cs` 加带 ILogger 的重载，
+  catch 块 LogWarning（budget/elapsed/kind/msg）；KlineReadService / KlineMinuteReadService 注入 logger。
+  其余 8 个 ReadService 仍走 NullLogger（按需后续传 logger）。
+
+- ✅ **F4 KlineReadService 复权路径并行化** — K 线 EnsureRange 与 adjust_factor EnsureFull
+  `Task.WhenAll` 并行发起，消除 dotnet 端两次 await 之间的空隙。
+
+- 🚫 **F5 RangeSlicer k_m/k_w 切片粒度收敛（评估后否决）** — 全史切片数翻倍会让总时长更长
+  （瓶颈是限流 90/min，不是单次切片大小）；F1+F2 已解决水位虚报主因，F5 收益不明风险存在。
+
+- ✅ **F6 Coverage.CheckRange 加 start 下界钳制（真 bug，复现+修复 2026-06-27）** —
+  触发：fetch 日志出现 `K线 sh.600050 m 1962-01-08~1972-01-05`（A股 1990 才开市，1962 完全无意义）。
+  根因：`Coverage.CheckRange` 只钳 `end > today`，**没钳 start 下界**。两条路径都中招：
+  - MCP 客户端误传异常早 start_date（如 1962-01-08）直接透传到 fetch；
+  - **更隐蔽**：`KlineLoader.LoadAsync` 指标预热扩展 `extStart = startDate - extraBars*CalendarDaysPerBar`
+    对 vegas_channel（EMA676 lookback=675）+ 月线（33 天/bar）算出 `675*33=22275 天 ≈ 61 年`，
+    把用户传的 2023-01-08 推回 1962-01-08，再透传给 fetch（实测完美匹配日志）。
+  落盘 SQL `first_date = LEAST(existing, sliceStart)` 让脏值永久 stuck。
+  修复：`Coverage.CheckRange` 在 `end > today` 后加 `if (start < BackfillStart(dataType)) start = BackfillStart(dataType);`
+  （兜底，所有路径都过 CheckRange）。`KlineLoader` 的 extStart 算式未改（仅影响 cache key 字符串，不影响正确性）。
+  - 测试：`test_start_before_epoch_clamped_to_backfill_start` + `test_start_before_epoch_with_existing_wm_clamped`
+  - 实跑验证：触发 `get_historical_k_data` 传 start=1962-01-08 → fetch 日志**零查询**（被钳到 1990，wm 已覆盖）；
+    触发 `get_vegas_channel` 传 start=2023-01-08（理论 extStart=1962）→ fetch 日志**零查询** + 工具正常返回 vegas 数据。
+
+### 2. 风险与回退
+
+- F1 改动是核心纯函数（Coverage），有 162 测试兜底，且新增针对性 case；不绿则回滚。
+- F2 是 SQL 一次性修复，备份后执行；可 rollback。
+- F3-F5 行为变化小，逐条独立提交，可单独回滚。
+- **部署只重建 mcp 容器，不碰 fetch**（避免触发 baostock 重登录红线，§0）。
+
+### 3. 部署节奏
+
+- 全部代码改完 + `dotnet test` 全绿 → 单独 `./up.sh mcp` 重建 mcp。
+- 部署后立即手动验证 sh.600050 k_m：触发一次读 → 观察 watermark 是否回退到 actualMax、下次读是否重抓补齐。
+
 ## 6. 收尾（待 David 拍板/部署）
 
 - ⬜ 部署 R1：重建 **fetch**（拿优先级队列，=新 bs.login，§0 间隔 >5min）+ **mcp**（Drainer/方案 A 读路径）。
