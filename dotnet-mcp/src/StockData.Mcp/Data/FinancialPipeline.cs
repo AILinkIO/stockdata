@@ -124,6 +124,11 @@ public sealed class FinancialWriter(StockDataDbContext db) : IFinancialWriter
     private async Task UpsertAsync(string code, List<FinRow> rows, CancellationToken ct)
     {
         if (rows.Count == 0) return;
+        // 按主键去重：PG 单条 INSERT + ON CONFLICT 不允许同命令二次影响同一行（cardinality_violation 21000）
+        rows = rows
+            .GroupBy(r => (r.ReportType, r.StatDate))
+            .Select(g => g.Last())
+            .ToList();
         var sb = new StringBuilder(
             "INSERT INTO financial_report (code,report_type,stat_date,pub_date,metrics,updated_at) VALUES ");
         var ps = new List<NpgsqlParameter>();
