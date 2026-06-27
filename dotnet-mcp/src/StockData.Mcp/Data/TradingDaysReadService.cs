@@ -19,9 +19,11 @@ public sealed class TradingDaysReadService(IServiceProvider root, IConfiguration
         await using var scope = root.CreateAsyncScope();
         var sp = scope.ServiceProvider;
         var db = sp.GetRequiredService<StockDataDbContext>();
-        var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
-        // 市场级（日历）：方案 A 下 pgOnly→定向高优先有界抓取；后台/手动 /sync/market 也保新鲜
-        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+        var watermarks = sp.GetRequiredService<IWatermarkStore>();
+        var tp = sp.GetRequiredService<TimeProvider>();
+        var now = tp.GetUtcNow();
+        await SyncAwaiter.EnsureAsync(config, ServeFromPgOnly, null, tp, ct,
+            SyncAwaiter.RangeCheck(watermarks, "", "trade_calendar", start, end, now),
             c => sp.GetRequiredService<TradeCalendarService>().EnsureRangeAsync(start, end, now, c));
         return await db.TradeCalendars.AsNoTracking()
             .Where(c => c.CalendarDate >= start && c.CalendarDate <= end && c.IsTradingDay)

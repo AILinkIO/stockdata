@@ -22,10 +22,15 @@ public sealed class DividendReadService(IServiceProvider root, IConfiguration co
         var sp = scope.ServiceProvider;
         var db = sp.GetRequiredService<StockDataDbContext>();
         var svc = sp.GetRequiredService<DividendService>();
-        var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
 
         if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
-        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+        var watermarks = sp.GetRequiredService<IWatermarkStore>();
+        var tp = sp.GetRequiredService<TimeProvider>();
+        var now = tp.GetUtcNow();
+        var divStart = new DateOnly(year, 1, 1);
+        var divEnd = new DateOnly(year, 12, 31);
+        await SyncAwaiter.EnsureAsync(config, ServeFromPgOnly, null, tp, ct,
+            SyncAwaiter.RangeCheck(watermarks, code, "dividend", divStart, divEnd, now),
             c => svc.EnsureAsync(code, year, yearType, now, c));
 
         var rows = await db.Dividends.AsNoTracking()

@@ -24,9 +24,11 @@ public sealed class TradeCalendarReadService(IServiceProvider root, IConfigurati
         var svc = sp.GetRequiredService<TradeCalendarService>();
         var time = sp.GetRequiredService<TimeProvider>();
 
-        // 市场级（日历）：方案 A 下 pgOnly→定向高优先有界抓取；后台/手动 /sync/market 也保新鲜
-        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
-            c => svc.EnsureRangeAsync(start, end, time.GetUtcNow(), c));
+        var watermarks = sp.GetRequiredService<IWatermarkStore>();
+        var tp = sp.GetRequiredService<TimeProvider>();
+        await SyncAwaiter.EnsureAsync(config, ServeFromPgOnly, null, tp, ct,
+            SyncAwaiter.RangeCheck(watermarks, "", "trade_calendar", start, end, tp.GetUtcNow()),
+            c => svc.EnsureRangeAsync(start, end, tp.GetUtcNow(), c));
 
         var rows = await db.TradeCalendars.AsNoTracking()
             .Where(c => c.CalendarDate >= start && c.CalendarDate <= end)
