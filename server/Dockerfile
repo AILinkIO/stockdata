@@ -1,5 +1,5 @@
 # stockdata server：api / fetcher / beat 共用一个镜像，compose 中以不同 command 启动
-FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
+FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim
 
 # tzdata：beat 调度与交易日判定依赖 Asia/Shanghai 时区数据
 RUN apt-get update \
