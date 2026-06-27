@@ -1,3 +1,6 @@
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using StockData.Mcp.Fetching;
 
 namespace StockData.Mcp.Data;
@@ -17,15 +20,20 @@ internal static class ReadFetch
     /// false → 维持旧的无界读穿透（普通优先级）。调用方传入以本方法的 ct 重建的 ensure 闭包。
     /// </summary>
     public static Task EnsureAsync(IConfiguration config, bool pgOnly, CancellationToken ct, Func<CancellationToken, Task> ensure)
-        => pgOnly ? TryAsync(config, ct, ensure) : ensure(ct);
+        => EnsureAsync(config, pgOnly, NullLogger.Instance, ct, ensure);
 
-    public static async Task TryAsync(IConfiguration config, CancellationToken ct, Func<CancellationToken, Task> ensure)
+    /// <summary>带 logger 的重载：吞异常时记录 warn（可观测"静默回退 PG"现象，P4-F3）。</summary>
+    public static Task EnsureAsync(IConfiguration config, bool pgOnly, ILogger logger, CancellationToken ct, Func<CancellationToken, Task> ensure)
+        => pgOnly ? TryAsync(config, logger, ct, ensure) : ensure(ct);
+
+    private static async Task TryAsync(IConfiguration config, ILogger logger, CancellationToken ct, Func<CancellationToken, Task> ensure)
     {
         var budget = config.GetValue("StockData:ReadFetchBudgetSeconds", 30);
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         if (budget > 0) cts.CancelAfter(TimeSpan.FromSeconds(budget));
         using (FetchPriority.High())
         {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             try
             {
                 await ensure(cts.Token);
@@ -35,7 +43,10 @@ internal static class ReadFetch
                 (ex is FetchTimeoutException or FetchFailedException
                  || (ex is OperationCanceledException && cts.IsCancellationRequested)))
             {
-                // 预算内未抓完/抓失败：回退到 PG 现状，不让交互读挂死或报错；后台 Drainer 续抓
+                // 预算内未抓完/抓失败：回退到 PG 现状，不让交互读挂死或报错；后台 Drainer 续抓。
+                // 加 warn 日志让"静默回退"可观测（P4-F3，否则 IsError=False 但数据可能空，用户无感）。
+                logger.LogWarning("ReadFetch 回退 PG：budget={Budget}s elapsed={Elapsed}ms kind={Kind} msg={Msg}",
+                    budget, sw.ElapsedMilliseconds, ex.GetType().Name, ex.Message);
             }
         }
     }

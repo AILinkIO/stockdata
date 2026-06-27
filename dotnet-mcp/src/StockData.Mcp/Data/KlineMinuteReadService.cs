@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace StockData.Mcp.Data;
 
@@ -7,7 +8,7 @@ namespace StockData.Mcp.Data;
 /// bar_time 右开区间 [start 00:00+08, (end+1) 00:00+08)（与旧 get_kline_minute 一致）。
 /// 始终注册，Enabled 反映开关。
 /// </summary>
-public sealed class KlineMinuteReadService(IServiceProvider root, IConfiguration config)
+public sealed class KlineMinuteReadService(IServiceProvider root, IConfiguration config, ILogger<KlineMinuteReadService> logger)
 {
     public bool Enabled => config.GetValue<bool>("StockData:PipelineEnabled");
     private bool ServeFromPgOnly => config.GetValue<bool>("StockData:ServeFromPgOnly");
@@ -20,7 +21,7 @@ public sealed class KlineMinuteReadService(IServiceProvider root, IConfiguration
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
         // 方案 A：pgOnly 时登记该票 + 定向高优先有界抓取（分钟数据；全量分钟线仍靠显式 minute 任务）
         if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
-        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, logger, ct,
             c => sp.GetRequiredService<KlineMinuteService>().EnsureRangeAsync(code, frequency, start, end, now, c));
 
         var lo = new DateTimeOffset(start.Year, start.Month, start.Day, 0, 0, 0, TimeSpan.FromHours(8));

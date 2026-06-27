@@ -2,6 +2,7 @@ using System.Buffers;
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using StockData.Mcp.Data.Entities;
 
 namespace StockData.Mcp.Data;
@@ -15,7 +16,7 @@ namespace StockData.Mcp.Data;
 /// 解析 DbContext/KlineService（不假设 MCP 是否按请求建 scope）。
 /// 仅支持 d/w/m 不复权；复权（adjust_flag 1/2）与分钟线仍由旧 REST 处理。
 /// </summary>
-public sealed class KlineReadService(IServiceProvider root, IConfiguration config)
+public sealed class KlineReadService(IServiceProvider root, IConfiguration config, ILogger<KlineReadService> logger)
 {
     public bool Enabled => config.GetValue<bool>("StockData:PipelineEnabled");
     private bool ServeFromPgOnly => config.GetValue<bool>("StockData:ServeFromPgOnly");
@@ -31,8 +32,18 @@ public sealed class KlineReadService(IServiceProvider root, IConfiguration confi
 
         // 方案 A：pgOnly 时登记该票（后台 Drainer 全量同步）+ 定向高优先有界抓取（拿到即新鲜，超预算回退 PG）
         if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
-        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+
+        // 复权（1 后复权 / 2 前复权）：K 线 EnsureRange 与 AdjustFactor EnsureFull **并行**发起
+        // （P4-F4）。两者相互独立、各自走 high 优先 fetch 队列；fetch worker 仍串行消费,
+        // 但消除了 dotnet 端的两次 await 之间的空隙,把 60s 串行预算压到 30s 上限。
+        var needAdjust = adjustFlag == "1" || adjustFlag == "2";
+        var klineTask = ReadFetch.EnsureAsync(config, ServeFromPgOnly, logger, ct,
             c => svc.EnsureRangeAsync(code, $"k_{frequency}", start, end, now, c));
+        var factorTask = needAdjust
+            ? ReadFetch.EnsureAsync(config, ServeFromPgOnly, logger, ct,
+                c => sp.GetRequiredService<AdjustFactorService>().EnsureFullAsync(code, end, now, c))
+            : Task.CompletedTask;
+        await Task.WhenAll(klineTask, factorTask);
 
         var rows = await db.Klines.AsNoTracking()
             .Where(k => k.Code == code && k.Frequency == frequency
@@ -40,11 +51,9 @@ public sealed class KlineReadService(IServiceProvider root, IConfiguration confi
             .OrderBy(k => k.TradeDate)
             .ToListAsync(ct);
 
-        // 复权（1 后复权 / 2 前复权）：确保完整因子序列 → 逐 bar 乘因子（不复权 3 直读原始）
-        if ((adjustFlag == "1" || adjustFlag == "2") && rows.Count > 0)
+        // 复权（1 后复权 / 2 前复权）：逐 bar 乘因子（不复权 3 直读原始）
+        if (needAdjust && rows.Count > 0)
         {
-            await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
-                c => sp.GetRequiredService<AdjustFactorService>().EnsureFullAsync(code, end, now, c));
             var factors = await db.AdjustFactors.AsNoTracking()
                 .Where(a => a.Code == code && a.DividOperateDate <= end)
                 .OrderBy(a => a.DividOperateDate)
