@@ -28,19 +28,21 @@ public sealed class KlineReadService(IServiceProvider root, IConfiguration confi
         var sp = scope.ServiceProvider;
         var db = sp.GetRequiredService<StockDataDbContext>();
         var svc = sp.GetRequiredService<KlineService>();
-        var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
+        var watermarks = sp.GetRequiredService<IWatermarkStore>();
+        var tp = sp.GetRequiredService<TimeProvider>();
+        var now = tp.GetUtcNow();
 
-        // 方案 A：pgOnly 时登记该票（后台 Drainer 全量同步）+ 定向高优先有界抓取（拿到即新鲜，超预算回退 PG）
+        // 方案 A：pgOnly 时登记该票（后台 Drainer 全量同步）+ 水位检查（Fresh→返回/有数据→返回stale/无数据→等Drainer）
         if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
 
-        // 复权（1 后复权 / 2 前复权）：K 线 EnsureRange 与 AdjustFactor EnsureFull **并行**发起
-        // （P4-F4）。两者相互独立、各自走 high 优先 fetch 队列；fetch worker 仍串行消费,
-        // 但消除了 dotnet 端的两次 await 之间的空隙,把 60s 串行预算压到 30s 上限。
+        // 复权（1 后复权 / 2 前复权）：K 线与 AdjustFactor 的水位检查**并行**（pgOnly 模式下均为纯水位查询，无 fetch）
         var needAdjust = adjustFlag == "1" || adjustFlag == "2";
-        var klineTask = ReadFetch.EnsureAsync(config, ServeFromPgOnly, logger, ct,
+        var klineTask = SyncAwaiter.EnsureAsync(config, ServeFromPgOnly, logger, tp, ct,
+            SyncAwaiter.RangeCheck(watermarks, code, $"k_{frequency}", start, end, now),
             c => svc.EnsureRangeAsync(code, $"k_{frequency}", start, end, now, c));
         var factorTask = needAdjust
-            ? ReadFetch.EnsureAsync(config, ServeFromPgOnly, logger, ct,
+            ? SyncAwaiter.EnsureAsync(config, ServeFromPgOnly, logger, tp, ct,
+                SyncAwaiter.AdjustFactorCheck(watermarks, db, code, now),
                 c => sp.GetRequiredService<AdjustFactorService>().EnsureFullAsync(code, end, now, c))
             : Task.CompletedTask;
         await Task.WhenAll(klineTask, factorTask);
