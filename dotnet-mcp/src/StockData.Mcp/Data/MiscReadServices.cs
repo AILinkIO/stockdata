@@ -16,9 +16,12 @@ public sealed class AdjustFactorReadService(IServiceProvider root, IConfiguratio
         await using var scope = root.CreateAsyncScope();
         var sp = scope.ServiceProvider;
         var db = sp.GetRequiredService<StockDataDbContext>();
-        var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
         if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
-        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+        var watermarks = sp.GetRequiredService<IWatermarkStore>();
+        var tp = sp.GetRequiredService<TimeProvider>();
+        var now = tp.GetUtcNow();
+        await SyncAwaiter.EnsureAsync(config, ServeFromPgOnly, null, tp, ct,
+            SyncAwaiter.AdjustFactorCheck(watermarks, db, code, now),
             c => sp.GetRequiredService<AdjustFactorService>().EnsureFullAsync(code, end, now, c));
 
         const string sql =

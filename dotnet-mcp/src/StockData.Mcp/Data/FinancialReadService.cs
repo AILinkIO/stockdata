@@ -24,9 +24,12 @@ public sealed class FinancialReadService(IServiceProvider root, IConfiguration c
         await using var scope = root.CreateAsyncScope();
         var sp = scope.ServiceProvider;
         var db = sp.GetRequiredService<StockDataDbContext>();
-        var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
         if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
-        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+        var watermarks = sp.GetRequiredService<IWatermarkStore>();
+        var tp = sp.GetRequiredService<TimeProvider>();
+        var now = tp.GetUtcNow();
+        await SyncAwaiter.EnsureAsync(config, ServeFromPgOnly, null, tp, ct,
+            SyncAwaiter.QuarterCheck(watermarks, db, code, year, quarter, now),
             c => sp.GetRequiredService<FinancialQuarterService>().EnsureAsync(code, year, quarter, now, c));
 
         var rows = await ReadQuarter(db, code, year, quarter, reportType, ct);
@@ -45,9 +48,12 @@ public sealed class FinancialReadService(IServiceProvider root, IConfiguration c
         await using var scope = root.CreateAsyncScope();
         var sp = scope.ServiceProvider;
         var db = sp.GetRequiredService<StockDataDbContext>();
-        var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
         if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
-        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+        var watermarks = sp.GetRequiredService<IWatermarkStore>();
+        var tp = sp.GetRequiredService<TimeProvider>();
+        var now = tp.GetUtcNow();
+        await SyncAwaiter.EnsureAsync(config, ServeFromPgOnly, null, tp, ct,
+            SyncAwaiter.RangeCheck(watermarks, code, reportType, start, end, now),
             c => sp.GetRequiredService<PerformanceService>().EnsureAsync(code, reportType, start, end, now, c));
 
         var rows = await db.FinancialReports.AsNoTracking()
@@ -81,6 +87,9 @@ public sealed class FinancialReadService(IServiceProvider root, IConfiguration c
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
         if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
 
+        var watermarks = sp.GetRequiredService<IWatermarkStore>();
+        var tp = sp.GetRequiredService<TimeProvider>();
+
         var buf = new ArrayBufferWriter<byte>();
         using (var w = new Utf8JsonWriter(buf, Wo))
         {
@@ -90,7 +99,8 @@ public sealed class FinancialReadService(IServiceProvider root, IConfiguration c
                 {
                     var qStart = new DateOnly(year, (quarter - 1) * 3 + 1, 1);
                     if (qStart > end || Coverage.QuarterEnd(year, quarter) < start) continue;
-                    await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+                    await SyncAwaiter.EnsureAsync(config, ServeFromPgOnly, null, tp, ct,
+                        SyncAwaiter.QuarterCheck(watermarks, db, code, year, quarter, now),
                         c => quarterSvc.EnsureAsync(code, year, quarter, now, c));
                     var rows = await ReadQuarter(db, code, year, quarter, null, ct);
                     if (rows.Count == 0) continue;

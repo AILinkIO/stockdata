@@ -20,6 +20,8 @@ public sealed class SnapshotReadService(IServiceProvider root, IConfiguration co
         var db = sp.GetRequiredService<StockDataDbContext>();
         var snaps = sp.GetRequiredService<SnapshotService>();
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
+        var watermarks = sp.GetRequiredService<IWatermarkStore>();
+        var tp = sp.GetRequiredService<TimeProvider>();
 
         var allowFallback = snapDate is null;
         if (await Resolve(sp, snapDate, now, ServeFromPgOnly, ct) is not DateOnly sd) return "[]";
@@ -31,7 +33,8 @@ public sealed class SnapshotReadService(IServiceProvider root, IConfiguration co
 
         for (var i = 0; i < (allowFallback ? 4 : 1); i++)
         {
-            await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+            await SyncAwaiter.EnsureAsync(config, ServeFromPgOnly, null, tp, ct,
+                SyncAwaiter.SnapshotCheck(watermarks, "", "stock_list", sd, now),
                 c => snaps.EnsureSnapshotAsync(new StockListIngest(db), sd, now, c));
             var json = await db.Database.SqlQueryRaw<string>(sql, sd).FirstAsync(ct);
             if (json != "[]" || !allowFallback) return json;
@@ -47,9 +50,12 @@ public sealed class SnapshotReadService(IServiceProvider root, IConfiguration co
         var sp = scope.ServiceProvider;
         var db = sp.GetRequiredService<StockDataDbContext>();
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
+        var watermarks = sp.GetRequiredService<IWatermarkStore>();
+        var tp = sp.GetRequiredService<TimeProvider>();
         if (await Resolve(sp, snapDate, now, ServeFromPgOnly, ct) is not DateOnly sd) return "[]";
 
-        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+        await SyncAwaiter.EnsureAsync(config, ServeFromPgOnly, null, tp, ct,
+            SyncAwaiter.SnapshotCheck(watermarks, "", $"index_{indexCode}", sd, now),
             c => sp.GetRequiredService<SnapshotService>().EnsureSnapshotAsync(new IndexConstituentIngest(db, indexCode), sd, now, c));
 
         const string sql =
@@ -65,9 +71,12 @@ public sealed class SnapshotReadService(IServiceProvider root, IConfiguration co
         var sp = scope.ServiceProvider;
         var db = sp.GetRequiredService<StockDataDbContext>();
         var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
+        var watermarks = sp.GetRequiredService<IWatermarkStore>();
+        var tp = sp.GetRequiredService<TimeProvider>();
         if (await Resolve(sp, snapDate, now, ServeFromPgOnly, ct) is not DateOnly sd) return "[]";
 
-        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+        await SyncAwaiter.EnsureAsync(config, ServeFromPgOnly, null, tp, ct,
+            SyncAwaiter.SnapshotCheck(watermarks, "", "industry", sd, now),
             c => sp.GetRequiredService<SnapshotService>().EnsureSnapshotAsync(new IndustryIngest(db), sd, now, c));
 
         var sql =

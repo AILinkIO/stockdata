@@ -23,10 +23,13 @@ public sealed class StockBasicReadService(IServiceProvider root, IConfiguration 
         var sp = scope.ServiceProvider;
         var db = sp.GetRequiredService<StockDataDbContext>();
         var snap = sp.GetRequiredService<SnapshotService>();
-        var now = sp.GetRequiredService<TimeProvider>().GetUtcNow();
 
         if (ServeFromPgOnly) await SyncRegistry.RegisterIfNewAsync(db, code, ct);
-        await ReadFetch.EnsureAsync(config, ServeFromPgOnly, ct,
+        var watermarks = sp.GetRequiredService<IWatermarkStore>();
+        var tp = sp.GetRequiredService<TimeProvider>();
+        var now = tp.GetUtcNow();
+        await SyncAwaiter.EnsureAsync(config, ServeFromPgOnly, null, tp, ct,
+            SyncAwaiter.SnapshotCheck(watermarks, code, "stock_basic", Coverage.Today(now), now),
             c => snap.EnsureSnapshotAsync(new StockBasicIngest(db, code), Coverage.Today(now), now, c));
 
         var r = await db.StockBasics.AsNoTracking().FirstOrDefaultAsync(x => x.Code == code, ct);
