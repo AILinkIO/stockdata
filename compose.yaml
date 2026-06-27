@@ -38,9 +38,8 @@ services:
       StockData__ApiBase: http://127.0.0.1:8080
       StockData__PipelineEnabled: "true"
       StockData__FetchBase: http://127.0.0.1:8090
-      StockData__ServeFromPgOnly: "true"   # 新抓取模型：读纯走 PG + 懒登记 + 水位检查等Drainer
-      StockData__ReadWaitDrainerSeconds: "300"  # 首次触达（PG无数据）时等待Drainer的最大秒数
-      StockData__ReadPollIntervalSeconds: "3"   # 水位轮询间隔秒数
+      StockData__ServeFromPgOnly: "true"   # 读纯走 PG + 懒登记 + 定向高优先有界抓取
+      StockData__ReadFetchBudgetSeconds: "300"  # 读路径定向抓取预算（秒）：Fresh跳过/不Fresh则high优先抓缺口
     restart: unless-stopped
     depends_on:
       fetch:
