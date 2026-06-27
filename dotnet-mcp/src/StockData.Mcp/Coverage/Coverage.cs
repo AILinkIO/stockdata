@@ -77,14 +77,16 @@ public static class Coverage
 
     /// <summary>
     /// 抓取完成后水位可声明的 last_date（写侧规则，fetcher 任务调用）。
-    /// 已定型部分按请求范围声明；未定型尾部只认实际返回的最大业务日期——
-    /// 数据源尚未发布的日期不声明覆盖，留待后续重抓（防永久空洞）。
+    /// 
+    /// 有数据时严格按 actualLast 声明——旧行为（声明到 Min(requestedEnd, SettledBoundary)）
+    /// 在数据源漏数据时虚报覆盖到定型边界，导致 CheckRange 永久判 Fresh 不补抓
+    /// （2026-06-27 PG 实测：3/4 k_m 票 wm.last_date 比实际 max(trade_date) 虚高 2 天）。
+    /// 无数据（actualLast=null）是合法空结果（复权无事件/财报未披露），声明到 cap 防反复重抓。
     /// </summary>
     public static DateOnly ClaimableLast(string dataType, DateOnly requestedEnd, DateOnly? actualLast, DateOnly today)
     {
-        var claimed = Min(requestedEnd, SettledBoundary(dataType, today));
-        if (actualLast is DateOnly a && a > claimed) claimed = a;
-        return claimed;
+        if (actualLast is DateOnly a) return a;
+        return Min(requestedEnd, SettledBoundary(dataType, today));
     }
 
     /// <summary>季度报告期：Q1→3/31、Q2→6/30、Q3→9/30、Q4→12/31。</summary>
@@ -124,7 +126,14 @@ public static class Coverage
         {
             // 除日历外业务数据不存在于未来：钳制请求尾，避免未来范围每次都判出尾部缺口
             if (end > today) end = today;
-            if (end < start) return Decision.Covered("请求范围全部在未来，无可抓取数据");
+            // 起始日期不得早于数据回填起点（A股 epoch 1990-12-19 / 分钟线 2023-01-01）。
+            // 不钳会导致:(1) 调用方误传异常早日期(如 1962)直接透传到 fetch,浪费 baostock 额度;
+            // (2) 落盘时 first_date=LEAST(existing, sliceStart) 永久污染水位;
+            // (3) 指标工具 KlineLoader 的预热扩展(vegas EMA676 月线 lookback 675×33≈61年)
+            //     可能把 2023 推到 1962——P4-F6 修复此路径。
+            var backfillStart = BackfillStart(dataType);
+            if (start < backfillStart) start = backfillStart;
+            if (end < start) return Decision.Covered("请求范围在回填起点之前或全部在未来，无可抓取数据");
         }
 
         if (wm is null)

@@ -37,6 +37,22 @@ public class CoverageTests
     }
 
     [Fact]
+    public void test_start_before_epoch_clamped_to_backfill_start()
+    {
+        var d = Coverage.CheckRange(null, "k_m", D(1962, 1, 8), TODAY, NOW);
+        Assert.False(d.Fresh);
+        Assert.Equal(Ranges((D(1990, 12, 19), TODAY)), d.FetchRanges);
+    }
+
+    [Fact]
+    public void test_start_before_epoch_with_existing_wm_clamped()
+    {
+        var w = Wm(D(1995, 1, 1), TODAY, 60);
+        var d = Coverage.CheckRange(w, "k_d", D(1962, 1, 8), TODAY, NOW);
+        Assert.Equal(Ranges((D(1990, 12, 19), D(1994, 12, 31))), d.FetchRanges);
+    }
+
+    [Fact]
     public void test_covered_history_is_fresh_forever()
     {
         var w = Wm(D(2020, 1, 1), D(2024, 12, 31), 10_000_000);
@@ -273,6 +289,14 @@ public class CoverageTests
     [Fact]
     public void test_claim_actual_data_claims_through_actual()
         => Assert.Equal(TODAY, Coverage.ClaimableLast("k_d", TODAY, TODAY, TODAY));
+
+    [Fact]
+    public void test_claim_actual_below_boundary_not_overclaimed()
+        => Assert.Equal(D(2026, 6, 9), Coverage.ClaimableLast("k_d", TODAY, D(2026, 6, 9), TODAY));
+
+    [Fact]
+    public void test_claim_actual_below_month_boundary_not_overclaimed()
+        => Assert.Equal(D(2026, 5, 29), Coverage.ClaimableLast("k_m", TODAY, D(2026, 5, 29), TODAY));
 
     [Fact]
     public void test_claim_empty_settled_range_claimed()
