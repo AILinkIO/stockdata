@@ -218,6 +218,27 @@ public sealed class SyncRunService(IServiceProvider root, IConfiguration config)
         return new { requeued, cutoff_hours = staleHours };
     }
 
+    /// <summary>
+    /// 显式重置所有 <c>status='failed'</c> 任务为 <c>pending</c>，交 Drainer 重试。
+    /// 立即返回（一条 UPDATE，不碰 baostock）。
+    ///
+    /// 与 <see cref="RefreshAsync"/> 区别：
+    /// - Refresh：done 且过期 → pending（日常 cron 定期回抓，幂等）
+    /// - Retry：failed → pending（人工/定时恢复，失败任务通常因 halt/网络瞬时问题）
+    ///
+    /// Coverage 幂等保证：被重置的任务重跑时，已新鲜的数据集（data_watermark Fresh）
+    /// 会跳过抓取，只补仍不新鲜的——不会无脑重抓 6 个数据集。
+    /// 永久失败的票（已退市/代码错误）重试后会再 failed，由人决定是否手动清理。
+    /// </summary>
+    public async Task<object> RetryFailedAsync(CancellationToken ct = default)
+    {
+        await using var scope = root.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<StockDataDbContext>();
+        var retried = await db.Database.ExecuteSqlRawAsync(
+            "UPDATE stock_sync_task SET status = 'pending', updated_at = now() WHERE status = 'failed'", ct);
+        return new { retried };
+    }
+
     /// <summary>同步进度观测：按状态计数 + 已纳管票数。</summary>
     public async Task<object> StatusAsync(CancellationToken ct = default)
     {

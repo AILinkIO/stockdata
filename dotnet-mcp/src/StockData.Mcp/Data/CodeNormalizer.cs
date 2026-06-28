@@ -17,6 +17,14 @@ public static partial class CodeNormalizer
     [GeneratedRegex(@"^\d{6}$")]
     private static partial Regex BareDigits();
 
+    /// <summary>
+    /// 是否已处于 baostock 前缀形式（sh./sz./bj. + 6 位数字）。
+    /// 接受大写前缀（内部 <see cref="ToBaostock"/> 仍会小写化输出）。
+    /// 仅作「能不能直接用」的快速判定，不负责补全裸 6 位 → 自动推断交易所。
+    /// </summary>
+    public static bool IsValid(string? code) =>
+        !string.IsNullOrWhiteSpace(code) && Prefixed().IsMatch(code.Trim());
+
     public static string ToBaostock(string code)
     {
         var c = code.Trim();
