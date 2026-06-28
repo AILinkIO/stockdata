@@ -1,8 +1,10 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/StockData.Mcp/StockData.Mcp.csproj" />
+    <Project Path="src/StockData.SyncCli/StockData.SyncCli.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/StockData.Mcp.Tests/StockData.Mcp.Tests.csproj" />
+    <Project Path="tests/StockData.SyncCli.Tests/StockData.SyncCli.Tests.csproj" />
   </Folder>
 </Solution>
