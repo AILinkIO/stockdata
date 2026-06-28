@@ -30,6 +30,10 @@ public sealed class SyncEngine
     private readonly ILogger<SyncEngine> _logger;
     private readonly TimeProvider _time;
 
+    // 启动时刻：RunAsync 内赋值，供 ForcePollAsync 计算 Elapsed。
+    // 进程内只有一个 SyncEngine 实例（DI 单例），无并发问题。
+    private DateTimeOffset _startedAt;
+
     public SyncEngine(
         SyncDrainer drainer,
         IProgressSource progress,
@@ -50,7 +54,8 @@ public sealed class SyncEngine
 
     public async Task RunAsync(CancellationToken ct)
     {
-        var startedAt = _time.GetUtcNow();
+        _startedAt = _time.GetUtcNow();
+        var startedAt = _startedAt;
         _progress.Emit(SyncProgress.Empty with { Elapsed = TimeSpan.Zero });
 
         // 平行的 progress poller；与 drainer 并行。任何一个抛 OperationCanceledException
@@ -77,6 +82,23 @@ public sealed class SyncEngine
             pollerCts.Cancel();
             try { await poller; } catch (OperationCanceledException) { /* 正常 */ }
             _logger.LogInformation("SyncEngine 退出");
+        }
+    }
+
+    /// <summary>
+    /// 立即查一次进度快照并 emit（跳过 1Hz poller 等待）。供 DashboardWindow 在
+    /// add stock / retry 等用户动作后强制刷新 dashboard 显示。
+    /// </summary>
+    public async Task ForcePollAsync()
+    {
+        try
+        {
+            var snapshot = await BuildSnapshotAsync(_startedAt, CancellationToken.None);
+            _progress.Emit(snapshot);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "ForcePollAsync 失败（忽略）");
         }
     }
 

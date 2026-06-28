@@ -22,7 +22,8 @@ namespace StockData.SyncCli;
 /// - **PG DSN 走 STOCKDATA_PG_DSN**：与 MCP / fetch 共用同一份 .env（README 已约定）；
 /// - **一次性 drain**：drain 命令默认就是消费 stock_sync_task 直到队列空/fetch halt 后退出
 ///   （cron 友好）。Ctrl-C 走 CancelKeyPress → cts.Cancel() 让底层 drain 走步级断点收尾。
-/// - **TUI 自动关闭**：drain 自然完成时 DashboardWindow 的 finally 会 RequestStop，
+/// - **TUI dashboard 长寿**：drain 自然完成不关 dashboard；用户按 q/Esc/Ctrl-C 才退。
+///   halt monitor 独立于 drain 生命周期，整 TUI session 持续跑；dashboard 关时
 ///   Program 再 cts.Cancel() 让 halt monitor 干净退出。
 /// </summary>
 public static class Program
@@ -202,9 +203,15 @@ public static class Program
         var dashboardLogger = sp.GetRequiredService<ILoggerFactory>().CreateLogger<DashboardWindow>();
 
         using var cts = new CancellationTokenSource();
-        var drainLoop = (CancellationToken ct) => Task.WhenAll(
-            engine.RunAsync(ct),
-            haltMonitor.RunAsync(ct));
+
+        // Halt monitor: 独立于 drain 生命周期，整 TUI session 期间持续运行。
+        // drain 可以由用户多次触发（d 键），但 halt monitor 必须始终盯着 fetch /status，
+        // 否则中途加股票触发的 drain 不会被 halt 自愈保护。
+        // fire-and-forget：token 由 cts 持有，dashboard 退出时 cts.Cancel() 收尾。
+        _ = Task.Run(() => haltMonitor.RunAsync(cts.Token), cts.Token);
+
+        // Drain: 只包 engine，不与 haltMonitor 捆绑。DashboardWindow 控制何时启/重启。
+        var drainAction = (CancellationToken ct) => engine.RunAsync(ct);
 
         // 关键：Terminal.Gui v2 实例化模型 — Application.Create() / Init() / Run() / Dispose()
         using IApplication app = Application.Create();
@@ -230,11 +237,10 @@ public static class Program
                 sp, syncRun, fetchControl,
                 tuiLogger);
             // 启后台 drain（Task.Run 走线程池，不阻塞 UI 主循环）
-            dashboard.StartDrainLoop(drainLoop);
-            // 阻塞直到 RequestStop / 用户按 Enter / Ctrl-C / drain 自然完成
+            dashboard.StartDrain(drainAction);
+            // 阻塞直到 RequestStop / 用户按 Enter / Ctrl-C（drain 自然完成不再关 dashboard）
             app.Run(dashboard);
-            // drain 自然完成 → DashboardWindow.StartDrainLoop 的 finally 已 RequestStop；
-            // 此处确保 cts 被取消，让 halt monitor 退出（它的 token 来自 cts）。
+            // dashboard 关闭 → cts 被取消，halt monitor 走 cancellation 退出。
             try { cts.Cancel(); } catch (ObjectDisposedException) { }
             logger.LogInformation("dashboard 退出");
             return 0;

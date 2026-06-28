@@ -52,14 +52,16 @@ namespace StockData.SyncCli.Ui;
 ///   回到 UI 线程（Dialog 必须在 UI 线程上 modally run）。
 ///
 /// 退出：
-/// - Ctrl-C → Program.cs 触发 <see cref="IApplication.RequestStop"/> → Terminal.Gui 结束主循环
+/// - Ctrl-C / q / Esc / Enter → <see cref="IApplication.RequestStop"/> → Terminal.Gui 结束主循环
 ///   → <see cref="Window.IsRunningChanged"/>（false）→ 这里取消后台 token、注销订阅、RemoveTimeout。
-/// - drain 自然完成（队列空 / fetch halt / 异常）→ <see cref="StartDrainLoop"/> 的 finally 块
-///   会主动 RequestStop，dashboard 同样走 IsRunningChanged 清理。
+/// - drain 自然完成（队列空 / fetch halt / 异常）→ <see cref="StartDrain"/> 的 finally 块
+///   仅 toast 提示 + force refresh，**不**主动 RequestStop，dashboard 保持开着供 d 键重触发。
 /// - 必须**不在** Dispose 里清订阅——那时 app 已经拆完，Invoke 抛 ObjectDisposed。
 ///
 /// Drain loop 启动时机：v2 没有「Loaded」事件，drain 在 <c>app.Run(window)</c> 之前由
-/// Program.RunTuiModeAsync 启 Task.Run。本窗口构造时仅订阅 + 装配 UI + 钩 IsRunningChanged。
+/// Program.RunTuiModeAsync 调 <see cref="StartDrain"/> 首次启动；运行期间用户按 d 键可在
+/// <see cref="HandleShortcut"/> 里重新触发。halt monitor 由 Program.RunTuiModeAsync 独立起，
+/// 不与 drain 生命周期绑定。
 /// </summary>
 public sealed class DashboardWindow : Window
 {
@@ -121,9 +123,14 @@ public sealed class DashboardWindow : Window
 
     private bool _subscribed;
 
+    // Drain 可重入：StartDrain 注册 action，StartDrainInternal 启动一个后台 Task；
+    // 用户按 d 时再次调 StartDrainInternal 即可重启（_drainRunning 防重入）。
+    private Func<CancellationToken, Task>? _drainAction;
+    private bool _drainRunning;
+
     /// <summary>
-    /// 构造窗口（装配 UI + 订阅 + 生命周期钩）。drain loop 由 <see cref="StartDrainLoop"/>
-    /// 在 <c>app.Run</c> 之前由 caller 启动。
+    /// 构造窗口（装配 UI + 订阅 + 生命周期钩）。drain loop 由 <see cref="StartDrain"/>
+    /// 在 <c>app.Run</c> 之前由 caller 启动；运行期间可由 d 键重新触发。
     /// </summary>
     /// <param name="tuiLogger">TUI 模式的日志 ring buffer（<c>null</c> 则不渲染 log 面板）。</param>
     public DashboardWindow(
@@ -305,7 +312,7 @@ public sealed class DashboardWindow : Window
         }
     }
 
-    private const string ShortcutsText = "[a] add stock   [r] retry   [f] restart fetch   [q] quit   [?] help";
+    private const string ShortcutsText = "[a] add stock   [d] drain   [r] retry   [f] restart fetch   [q] quit   [?] help";
 
     /// <summary>
     /// 从 TuiLoggerProvider 拉快照，与上次比对后写入 TextView。无新条目时跳过 SetText（避免抖动）。
@@ -332,23 +339,46 @@ public sealed class DashboardWindow : Window
     private const int LogPaneCapacity = 50;
 
     /// <summary>
-    /// 启动 drain loop。Caller 在 <c>app.Run</c> **之前**调用一次。
-    /// 用 <c>Task.Run</c> 走线程池，UI 主循环不被阻塞；token 来自 <see cref="_runCts"/>，
-    /// 由 <see cref="OnIsRunningChanged"/> 在窗口关闭时取消。
+    /// 注册 drain action 并立即首次触发。drain 完成后 dashboard 保持开着（不 RequestStop），
+    /// 改为 toast 提示 + force refresh。用户可按 d 重新触发。
     /// </summary>
-    public void StartDrainLoop(Func<CancellationToken, Task> drainLoop)
+    public void StartDrain(Func<CancellationToken, Task> drainAction)
     {
-        ArgumentNullException.ThrowIfNull(drainLoop);
+        ArgumentNullException.ThrowIfNull(drainAction);
+        _drainAction = drainAction;
+        StartDrainInternal();
+    }
+
+    private void StartDrainInternal()
+    {
+        if (_drainRunning || _drainAction is null) return;
+        _drainRunning = true;
+        var action = _drainAction;
         var token = _runCts.Token;
         _ = Task.Run(async () =>
         {
-            try { await drainLoop(token).ConfigureAwait(false); }
-            catch (OperationCanceledException) { /* 正常 */ }
-            catch (Exception ex) { _logger.LogError(ex, "drain loop 异常"); }
+            try
+            {
+                await action(token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) { /* 正常退出 */ }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "drain 异常");
+                try { _app.Invoke(() => ShowToast($"drain 异常：{ex.Message}")); }
+                catch (ObjectDisposedException) { /* app 已关 */ }
+            }
             finally
             {
-                // drain 退出后通知 UI 关掉（即便不是 Ctrl-C 路径，例如自然完成）
-                try { _app.Invoke(() => _app.RequestStop()); }
+                _drainRunning = false;
+                try
+                {
+                    _app.Invoke(() =>
+                    {
+                        ShowToast("drain 完成（按 d 重新触发，按 q 退出）");
+                        _ = ForceProgressRefreshAsync();
+                    });
+                }
                 catch (ObjectDisposedException) { /* app 已关 */ }
             }
         }, token);
@@ -463,6 +493,15 @@ public sealed class DashboardWindow : Window
         {
             case KeyCode.A:
                 _ = PromptAddStockAsync();
+                break;
+            case KeyCode.D:
+                if (_drainRunning)
+                    ShowToast("drain 进行中...");
+                else
+                {
+                    ShowToast("启动 drain...");
+                    StartDrainInternal();
+                }
                 break;
             case KeyCode.R:
                 _ = PromptRetryFailedAsync();
@@ -597,7 +636,11 @@ public sealed class DashboardWindow : Window
 
             var result = await Task.Run(() => _syncRun.RetryFailedAsync()).ConfigureAwait(false);
             var retried = ExtractRetried(result);
-            _app.Invoke(() => ShowToast($"已重置 {retried} 个任务为 pending"));
+            _app.Invoke(() =>
+            {
+                ShowToast($"已重置 {retried} 个任务为 pending");
+                _ = ForceProgressRefreshAsync();
+            });
         }
         catch (Exception ex)
         {
@@ -710,7 +753,11 @@ public sealed class DashboardWindow : Window
                 await SyncRegistry.RegisterIfNewAsync(db, code!);
                 await db.SaveChangesAsync().ConfigureAwait(false);
             }).ConfigureAwait(false);
-            _app.Invoke(() => ShowToast($"已纳管 {code}（pending 任务已建，drain 下轮捡起）"));
+            _app.Invoke(() =>
+            {
+                ShowToast($"已纳管 {code}（pending 任务已建）");
+                _ = ForceProgressRefreshAsync();
+            });
         }
         catch (Exception ex)
         {
@@ -805,23 +852,24 @@ public sealed class DashboardWindow : Window
                     X = Pos.Center(),
                     Y = Pos.Center(),
                     Width = 60,
-                    Height = 11,
+                    Height = 12,
                 };
                 var text = new Label
                 {
                     X = 1,
                     Y = 0,
                     Width = Dim.Fill(2),
-                    Height = 7,
+                    Height = 8,
                     Text =
                         "  [a]  add stock（输入 code 写 synced_stock + pending task）\n" +
+                        "  [d]  drain（重新触发同步，处理新加入/重置的任务）\n" +
                         "  [r]  retry failed tasks（reset failed → pending）\n" +
                         "  [f]  restart fetch（POST /restart）\n" +
                         "  [q]  quit dashboard（同 Ctrl-C）\n" +
                         "  [?]  toggle this help\n\n" +
                         "  Enter 关闭。retry / restart 都需要确认。",
                 };
-                var ok = new Button { Text = "OK", X = Pos.Center(), Y = 6, IsDefault = true };
+                var ok = new Button { Text = "OK", X = Pos.Center(), Y = 7, IsDefault = true };
                 ok.Accepting += (_, _) => _app.RequestStop();
                 help.Add(text, ok);
 
@@ -878,6 +926,20 @@ public sealed class DashboardWindow : Window
     {
         if (s.Halted is null) return 0;
         return Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeSeconds() - s.Halted.Since);
+    }
+
+    /// <summary>跳过 1Hz 等待，立即查一次进度并 emit 快照。add stock / retry 后调用。</summary>
+    private async Task ForceProgressRefreshAsync()
+    {
+        try
+        {
+            var engine = _root.GetRequiredService<SyncEngine>();
+            await engine.ForcePollAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "ForceProgressRefresh 失败（忽略）");
+        }
     }
 
     private static int ExtractRetried(object? retryResult)
