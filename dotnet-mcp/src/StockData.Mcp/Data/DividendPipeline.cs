@@ -73,6 +73,17 @@ public sealed class DividendWriter(StockDataDbContext db) : IDividendWriter
     public async Task<int> PersistAsync(string code, int year, string yearType, FetchPayload payload, DateTimeOffset now, CancellationToken ct = default)
     {
         var rows = DividendParser.Parse(payload, code, year, yearType);
+        // 按主键去重 + 字段级 merge：PG 单条 INSERT + ON CONFLICT 不允许同命令二次影响同一行
+        // （cardinality_violation 21000）。baostock 对部分票/年返回重复行——大多数是完全相同
+        // 的纯重复，少数是"近重复"（同 plan_announce_date 但某条缺字段、另一条完整，如 sz.002338
+        // 2021：row[0] dividCashPsBeforeTax 为空、row[1] 有 0.08）。简单 g.Last() 碰巧能 work
+        // （baostock 恰好把完整行放后面），但依赖行序、不健壮；改字段级 merge 保证无论行序如何
+        // 都得最完整记录。PK=(code, plan_announce_date, year_type)，同调用 code/year/yearType
+        // 恒定，按 plan_announce_date 分组即可。
+        rows = rows
+            .GroupBy(r => r[1])
+            .Select(g => MergeGroup(g.ToList()))
+            .ToList();
         await using var tx = await db.Database.BeginTransactionAsync(ct);
 
         var n = rows.Count == 0 ? 0 : await UpsertAsync(rows, ct);
@@ -119,6 +130,22 @@ public sealed class DividendWriter(StockDataDbContext db) : IDividendWriter
         var setCols = cols.Where(c => !pk.Contains(c)).Select(c => $"{c}=EXCLUDED.{c}").Append("updated_at=now()");
         sb.Append($" ON CONFLICT ({string.Join(",", pk)}) DO UPDATE SET ").Append(string.Join(",", setCols));
         return await db.Database.ExecuteSqlRawAsync(sb.ToString(), ps, ct);
+    }
+
+    /// <summary>
+    /// 同主键多行合并为一条：逐字段取非空值。处理 baostock 近重复行（同 plan_announce_date
+    /// 但某行缺字段、另一行完整）。PK 列（code/plan_announce_date/year_type）各组相同，
+    /// merge 实际只影响非空替换；detail JSONB 同理——首条非空即保留。
+    /// </summary>
+    private static object?[] MergeGroup(List<object?[]> group)
+    {
+        if (group.Count == 1) return group[0];
+        var merged = (object?[])group[0].Clone();
+        foreach (var row in group.Skip(1))
+            for (var c = 0; c < merged.Length; c++)
+                if (merged[c] is null or DBNull)
+                    merged[c] = row[c];
+        return merged;
     }
 }
 
