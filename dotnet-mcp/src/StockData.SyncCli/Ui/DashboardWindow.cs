@@ -113,6 +113,20 @@ public sealed class DashboardWindow : Window
     private DateTimeOffset? _lastLogTailTs;
     private int _lastLogCount = -1;
 
+    // Stocks 面板：所有已纳管票 + 水位覆盖摘要；超出可视行时支持滚动。独立 5s 轮询（水位变化慢，不需 1Hz）。
+    private readonly FrameView _stocksFrame;
+    private readonly Label _stocksLabel;
+    private object? _stocksTimeoutToken;
+    // 上一轮渲染的 text：相同 → 跳过 Label.Text setter（与其它面板同款内容-diff）。
+    private string? _lastStocksText;
+    // 滚动状态：_allStocks 持有最新一次 5s 刷新拿到的全部票（listview 风格手动滑动窗口）。
+    private List<StockEntry> _allStocks = new();
+    private int _stocksScrollOffset;
+    private int _stocksVisibleRows;
+    private bool _userScrolled;
+
+    private sealed record StockEntry(string Code, string Status, int WmCount, string WmLast);
+
     // Toast + 快捷键栏
     private readonly Label _toast;
     private readonly Label _shortcutsBar;
@@ -219,6 +233,31 @@ public sealed class DashboardWindow : Window
         statusPane.Add(_statusHalted, _statusElapsed, _statusEta, _statusSpeed);
         Add(statusPane);
 
+        // ── Stocks 面板：所有已纳管票 + 水位覆盖摘要，支持滚动 ───────────
+        // 嵌在 status 面板正下方、log 面板上方。Display-only Label（无焦点），
+        // 5s 轮询一次——水位变化慢，独立于 1Hz progress poller 和 2s log poller。
+        // Dim.Fill(N) = parent height - N rows from bottom；
+        // N=10 = log(8) + toast gap(1) + shortcuts bar(1)。Dim 与 Pos 独立求值，
+        // 所以 log / toast / shortcuts 用 Pos.Bottom / Pos.AnchorEnd 链式定位不冲突。
+        _stocksFrame = new FrameView
+        {
+            X = 0,
+            Y = Pos.Bottom(statusPane) + 1,
+            Width = Dim.Fill(),
+            Height = Dim.Fill(10),
+            Title = "stocks",
+        };
+        _stocksLabel = new Label
+        {
+            X = 0,
+            Y = 0,
+            Width = Dim.Fill(),
+            Height = Dim.Fill(),
+            Text = "(loading...)",
+        };
+        _stocksFrame.Add(_stocksLabel);
+        Add(_stocksFrame);
+
         // ── Log 面板（TUI 模式专属）───────────────────────────────
         // 之所以需要：Microsoft.Extensions.Logging.Console 写 Console.Out → 与 Terminal.Gui
         // 抢 ANSI 流 → 渲染错位。改由 TuiLoggerProvider 写 ring buffer，dashboard 内部展示。
@@ -228,9 +267,9 @@ public sealed class DashboardWindow : Window
             logFrame = new FrameView
             {
                 X = 0,
-                Y = Pos.Bottom(statusPane) + 1,
+                Y = Pos.Bottom(_stocksFrame) + 1,
                 Width = Dim.Fill(),
-                Height = 8,
+                Height = 8,   // 固定 8 行（5 → 8）：底栏 + toast 1 行让 stocksFrame 通过 Dim.Fill 占满
                 Title = "log",
             };
 #pragma warning disable CS0618   // TextView 标 obsolete（v2.4.12 引入 EditorView 替代品，但 EditorView 来自独立包 tui-cs/Editor，本项目不引入）
@@ -310,6 +349,26 @@ public sealed class DashboardWindow : Window
                 }
             });
         }
+
+        // Stocks 面板：5s 刷一次（水位变化慢，不需 1Hz；独立于 progress poller 和 log pane）。
+        // AddTimeout 回调在主 UI 线程上执行——RefreshStocksPaneAsync 内部仍走 _app.Invoke 作为
+        // 保险：await 之后的 continuation 可能落到 thread pool，避免 Label.Text setter 跨线程。
+        _stocksTimeoutToken = _app.AddTimeout(TimeSpan.FromSeconds(5), () =>
+        {
+            try
+            {
+                _ = RefreshStocksPaneAsync();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "RefreshStocksPane timeout 异常");
+                return true;
+            }
+        });
+
+        // 首次加载：不等 5s timeout，立刻查一次（与 Render(SyncProgress.Empty) 同思路）
+        _ = RefreshStocksPaneAsync();
     }
 
     private const string ShortcutsText = "[a] add stock   [d] drain   [r] retry   [f] restart fetch   [q] quit   [?] help";
@@ -337,6 +396,99 @@ public sealed class DashboardWindow : Window
 
     /// <summary>log 面板里显示的最多条数（最近 N 条）。</summary>
     private const int LogPaneCapacity = 50;
+
+    /// <summary>
+    /// 查所有 full stock_sync_task + 每票的 data_watermark 覆盖摘要，存进 _allStocks 后调 RenderStocksPane。
+    /// 独立 5s 刷新（不依赖 1Hz progress poller）：水位变化慢，省 CPU。
+    /// SQL：单次查询 + 两个相关子查询（count + max），不触发 N+1。
+    /// </summary>
+    private async Task RefreshStocksPaneAsync()
+    {
+        try
+        {
+            await using var scope = _root.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<StockDataDbContext>();
+
+            // 全量取：按 UpdatedAt DESC 排序（最近更新的在前）；无 Take。
+            // 子查询在 EF Core 翻译成 SQL 相关子查询（单次 round-trip）。
+            var rows = await db.StockSyncTasks.AsNoTracking()
+                .Where(t => t.Kind == "full")
+                .OrderByDescending(t => t.UpdatedAt)
+                .Select(t => new
+                {
+                    t.Code,
+                    t.Status,
+                    WmCount = db.DataWatermarks.Count(w => w.Code == t.Code),
+                    WmLast = (DateTimeOffset?)db.DataWatermarks
+                        .Where(w => w.Code == t.Code)
+                        .Max(w => (DateTimeOffset?)w.LastFetchedAt),
+                })
+                .ToListAsync().ConfigureAwait(false);
+
+            _allStocks = rows.Select(r => new StockEntry(
+                r.Code,
+                r.Status,
+                r.WmCount,
+                r.WmLast is null ? "-" : FormatRelative(r.WmLast.Value))).ToList();
+
+            // 用户没动过滚动 → 5s 刷新后回到顶部（最热最新票在前）。
+            // 用户动过 → 保留原 offset（但 RenderStocksPane 内部会 clamp 到新边界）。
+            if (!_userScrolled) _stocksScrollOffset = 0;
+
+            // RenderStocksPane 自己用 _app.Invoke 切回 UI 线程——timeout 回调已在 UI 线程，
+            // 但 await continuation 可能落到 thread pool；Invoke 保险一次。
+            _app.Invoke(RenderStocksPane);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "RefreshStocksPane 查询失败");
+        }
+    }
+
+    /// <summary>
+    /// 把 _allStocks 的当前可见窗口（_stocksScrollOffset 起 _stocksVisibleRows 行）格式化到 _stocksLabel。
+    /// 必须由 UI 线程调用（已被 RefreshStocksPaneAsync 内部的 _app.Invoke 包好）。
+    /// 取可视行数：FrameView 渲染后实际高度 = Frame.Height，内容区 = Frame.Height - 2（border），
+    /// Label 第一行是表头，所以数据行 = Frame.Height - 3。
+    /// </summary>
+    private void RenderStocksPane()
+    {
+        // Frame 在布局后才有有效高度；首轮 Render 时 frame.Height 可能是 0/1，给个保守下限。
+        _stocksVisibleRows = Math.Max(1, _stocksFrame.Frame.Height - 3);
+
+        if (_allStocks.Count == 0)
+        {
+            const string empty = "stocks (0 registered)\n(no data)";
+            SetIfChanged(_stocksLabel, empty, ref _lastStocksText);
+            return;
+        }
+
+        var total = _allStocks.Count;
+        // clamp：滚动后 _allStocks 缩短时不能让 offset 越界
+        var maxOffset = Math.Max(0, total - _stocksVisibleRows);
+        if (_stocksScrollOffset > maxOffset) _stocksScrollOffset = maxOffset;
+        if (_stocksScrollOffset < 0) _stocksScrollOffset = 0;
+
+        var lastShown = Math.Min(_stocksScrollOffset + _stocksVisibleRows, total);
+        var title = total <= _stocksVisibleRows
+            ? $"stocks ({total} registered)"
+            : $"stocks ({total} registered) [{_stocksScrollOffset + 1}-{lastShown}/{total}]";
+
+        var lines = new List<string> { "code         status   wm    last fetch" };
+        foreach (var s in _allStocks.Skip(_stocksScrollOffset).Take(_stocksVisibleRows))
+            lines.Add($"{s.Code,-12} {s.Status,-8} {s.WmCount,-5} {s.WmLast}");
+
+        SetIfChanged(_stocksLabel, title + "\n" + string.Join('\n', lines), ref _lastStocksText);
+    }
+
+    /// <summary>watermark last fetch 相对时间（just now / Nm ago / Nh ago）。</summary>
+    private static string FormatRelative(DateTimeOffset t)
+    {
+        var delta = DateTimeOffset.UtcNow - t;
+        return delta.TotalHours >= 1 ? $"{(int)delta.TotalHours}h ago" :
+               delta.TotalMinutes >= 1 ? $"{(int)delta.TotalMinutes}m ago" :
+               "just now";
+    }
 
     /// <summary>
     /// 注册 drain action 并立即首次触发。drain 完成后 dashboard 保持开着（不 RequestStop），
@@ -517,10 +669,34 @@ public sealed class DashboardWindow : Window
             case (KeyCode)'/':   // ? 在 US kb 是 Shift+/，某些键盘布局直接报 KeyCode='/'=47；保险覆盖
                 _ = ToggleHelpOverlayAsync();
                 break;
+            case KeyCode.CursorUp:
+            case KeyCode.K:
+                ScrollStocks(-1);
+                break;
+            case KeyCode.CursorDown:
+            case KeyCode.J:
+                ScrollStocks(+1);
+                break;
             default:
                 // 其它键不消费，让 View 走默认逻辑
                 break;
         }
+    }
+
+    /// <summary>
+    /// Stocks 面板滚动 +1/-1 行。clamp 到 [0, total - visibleRows]。到达边界就不再动。
+    /// UI 线程上跑（KeyDown 触发）；直接 RenderStocksPane 即可，不需 Invoke。
+    /// 任何方向位移都置 _userScrolled=true，让下次 5s 刷新不再重置 offset。
+    /// </summary>
+    private void ScrollStocks(int delta)
+    {
+        if (_allStocks.Count == 0) return;
+        var maxOffset = Math.Max(0, _allStocks.Count - _stocksVisibleRows);
+        var next = Math.Clamp(_stocksScrollOffset + delta, 0, maxOffset);
+        if (next == _stocksScrollOffset) return;   // 已到边，不重绘
+        _stocksScrollOffset = next;
+        _userScrolled = true;
+        RenderStocksPane();
     }
 
     /// <summary>
@@ -852,21 +1028,22 @@ public sealed class DashboardWindow : Window
                     X = Pos.Center(),
                     Y = Pos.Center(),
                     Width = 60,
-                    Height = 12,
+                    Height = 13,
                 };
                 var text = new Label
                 {
                     X = 1,
                     Y = 0,
                     Width = Dim.Fill(2),
-                    Height = 8,
+                    Height = 9,
                     Text =
                         "  [a]  add stock（输入 code 写 synced_stock + pending task）\n" +
                         "  [d]  drain（重新触发同步，处理新加入/重置的任务）\n" +
                         "  [r]  retry failed tasks（reset failed → pending）\n" +
                         "  [f]  restart fetch（POST /restart）\n" +
                         "  [q]  quit dashboard（同 Ctrl-C）\n" +
-                        "  [?]  toggle this help\n\n" +
+                        "  [?]  toggle this help\n" +
+                        "  [↑/↓]  scroll stocks pane（or k/j）\n\n" +
                         "  Enter 关闭。retry / restart 都需要确认。",
                 };
                 var ok = new Button { Text = "OK", X = Pos.Center(), Y = 7, IsDefault = true };
@@ -964,6 +1141,11 @@ public sealed class DashboardWindow : Window
         if (_logTimeoutToken is not null)
         {
             try { _app.RemoveTimeout(_logTimeoutToken); } catch (ObjectDisposedException) { /* app 已关 */ }
+        }
+        if (_stocksTimeoutToken is not null)
+        {
+            try { _app.RemoveTimeout(_stocksTimeoutToken); } catch (ObjectDisposedException) { /* app 已关 */ }
+            _stocksTimeoutToken = null;
         }
         if (_toastTimeoutToken is not null)
         {
