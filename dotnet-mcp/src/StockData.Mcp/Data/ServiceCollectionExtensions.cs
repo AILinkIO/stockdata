@@ -39,14 +39,11 @@ public static class ServiceCollectionExtensions
         services.TryAddSingleton(TimeProvider.System);
 
         // 命令式同步编排：单例，各自建 scope（仅管线开启时注册，端点据此 503 判活）
-        var wakeUp = new SyncWakeUp();
-        services.AddSingleton(wakeUp);
-        SyncRegistry.Configure(wakeUp);
         services.AddSingleton<StockSyncService>();
         services.AddSingleton<SyncMarketService>();
         services.AddSingleton<SyncRunService>();
-        // 常驻消费者（方案 A）：唯一串行驱动 baostock 的后台 worker
-        services.AddHostedService<SyncDrainer>();
+        // 故意不 AddHostedService<SyncDrainer>()：唯一串行通道改由 sync-cli 一次性 drain RunAsync，
+        // 在此挂载会导致 baostock 双消费。
 
         services.AddSingleton(new FetchClientOptions
         {
@@ -75,7 +72,7 @@ public static class ServiceCollectionExtensions
             PollSeconds = config.GetValue("StockData:FetchHaltPollSeconds", 60),
             RestartCooldownSeconds = config.GetValue("StockData:FetchRestartCooldownSeconds", 600),
         });
-        services.AddHostedService<FetchHaltMonitor>();
+        // 故意不 AddHostedService<FetchHaltMonitor>()：与 SyncDrainer 同理，迁给 sync-cli 独占。
 
         return services;
     }

@@ -2,6 +2,7 @@
 #   - PostgreSQL 与 Valkey(Redis) 使用物理机服务（127.0.0.1）
 #   - fetch（无状态 baostock 抓取微服务）/ mcp（dotnet，唯一 PG 属主 + 全部工具 serving）在容器中
 # 容器走 host 网络直连本机服务。旧 api/Celery/alembic 已下线（数据落盘与 serving 全在 dotnet）。
+# 后台同步改由宿主机 cron 调 ./scripts/sync.sh drain（一次性），不再常驻容器服务。
 #
 #   ./up.sh                       # 等价于 sudo docker compose up -d --build
 #   sudo docker compose ps

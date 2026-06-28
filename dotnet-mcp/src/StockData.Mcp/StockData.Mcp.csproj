@@ -20,5 +20,6 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="StockData.Mcp.Tests" />
+    <InternalsVisibleTo Include="StockData.SyncCli" />
   </ItemGroup>
 </Project>

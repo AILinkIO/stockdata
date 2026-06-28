@@ -1,5 +1,4 @@
 using System.Net.Http.Json;
-using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace StockData.Mcp.Fetching;
@@ -57,26 +56,29 @@ public sealed class FetchHaltMonitorOptions
 /// 可能延长封禁，故不一暂停就 restart；冷却到点才尝试。若恢复后下个 job 又被拉黑，新的
 /// since 重置 → 下次 restart 自然再隔一个冷却，restart 之间天然 ≥ 冷却间隔（尊重 >5min 红线）。
 /// 仅管线开启（注册了 fetch 客户端）时挂载。
+///
+/// 从 BackgroundService 抽离为可注入的 plain class：承载由调用方（CLI 的 HaltMonitor）负责。
+/// 静态辅助 <see cref="ShouldRestart"/> / <see cref="HaltedSeconds"/> 保持原签名，单测零迁移成本。
 /// </summary>
 public sealed class FetchHaltMonitor(
     IFetchControl control,
     FetchHaltMonitorOptions options,
     TimeProvider time,
-    ILogger<FetchHaltMonitor> logger) : BackgroundService
+    ILogger<FetchHaltMonitor> logger)
 {
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public async Task RunAsync(CancellationToken ct)
     {
         logger.LogInformation(
             "fetch 暂停监视已启动（轮询 {Poll}s / 冷却 {Cooldown}s）",
             options.PollSeconds, options.RestartCooldownSeconds);
 
-        while (!stoppingToken.IsCancellationRequested)
+        while (!ct.IsCancellationRequested)
         {
             try
             {
-                await TickAsync(stoppingToken);
+                await TickAsync(ct);
             }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
                 break;
             }
@@ -88,7 +90,7 @@ public sealed class FetchHaltMonitor(
 
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(options.PollSeconds), time, stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(options.PollSeconds), time, ct);
             }
             catch (OperationCanceledException) { break; }
         }
