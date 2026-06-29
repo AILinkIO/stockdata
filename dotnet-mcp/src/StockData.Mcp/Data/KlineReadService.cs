@@ -21,8 +21,9 @@ public sealed class KlineReadService(IServiceProvider root, IConfiguration confi
     public bool Enabled => config.GetValue<bool>("StockData:PipelineEnabled");
     private bool ServeFromPgOnly => config.GetValue<bool>("StockData:ServeFromPgOnly");
 
-    public async Task<string> GetHistoricalJsonAsync(
+    public Task<string> GetHistoricalJsonAsync(
         string code, string frequency, DateOnly start, DateOnly end, string adjustFlag, CancellationToken ct = default)
+        => SyncAwaiter.GuardAsync(async () =>
     {
         await using var scope = root.CreateAsyncScope();
         var sp = scope.ServiceProvider;
@@ -79,7 +80,7 @@ public sealed class KlineReadService(IServiceProvider root, IConfiguration confi
         }
 
         return Serialize(rows);
-    }
+    });
 
     /// <summary>Kline 列表 → JSON 数组（列序/键名对齐 model_columns(Kline)）。</summary>
     internal static string Serialize(IReadOnlyList<Kline> rows)

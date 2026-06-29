@@ -13,7 +13,8 @@ public sealed class KlineMinuteReadService(IServiceProvider root, IConfiguration
     public bool Enabled => config.GetValue<bool>("StockData:PipelineEnabled");
     private bool ServeFromPgOnly => config.GetValue<bool>("StockData:ServeFromPgOnly");
 
-    public async Task<string> GetJsonAsync(string code, short frequency, DateOnly start, DateOnly end, CancellationToken ct = default)
+    public Task<string> GetJsonAsync(string code, short frequency, DateOnly start, DateOnly end, CancellationToken ct = default)
+        => SyncAwaiter.GuardAsync(async () =>
     {
         await using var scope = root.CreateAsyncScope();
         var sp = scope.ServiceProvider;
@@ -32,5 +33,5 @@ public sealed class KlineMinuteReadService(IServiceProvider root, IConfiguration
             "SELECT COALESCE(json_agg(t ORDER BY t.bar_time), '[]')::text AS \"Value\" FROM kline_minute t " +
             "WHERE t.code = {0} AND t.frequency = {1} AND t.bar_time >= {2} AND t.bar_time < {3}";
         return await db.Database.SqlQueryRaw<string>(sql, code, (int)frequency, lo.ToUniversalTime(), hi.ToUniversalTime()).FirstAsync(ct);
-    }
+    });
 }
