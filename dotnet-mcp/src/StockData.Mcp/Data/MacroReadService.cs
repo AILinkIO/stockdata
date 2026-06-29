@@ -12,7 +12,8 @@ public sealed class MacroReadService(IServiceProvider root, IConfiguration confi
     private bool ServeFromPgOnly => config.GetValue<bool>("StockData:ServeFromPgOnly");
 
     /// <summary>利率类（deposit_rate / loan_rate / rrr）：按 pub_date 范围。</summary>
-    public async Task<string> GetRatesJsonAsync(string kind, DateOnly start, DateOnly end, CancellationToken ct = default)
+    public Task<string> GetRatesJsonAsync(string kind, DateOnly start, DateOnly end, CancellationToken ct = default)
+        => SyncAwaiter.GuardAsync(async () =>
     {
         await using var scope = root.CreateAsyncScope();
         var sp = scope.ServiceProvider;
@@ -28,9 +29,10 @@ public sealed class MacroReadService(IServiceProvider root, IConfiguration confi
         var sql = $"SELECT COALESCE(json_agg(t ORDER BY t.pub_date), '[]')::text AS \"Value\" " +
                   $"FROM {table} t WHERE t.pub_date >= {{0}} AND t.pub_date <= {{1}}";
         return await db.Database.SqlQueryRaw<string>(sql, start, end).FirstAsync(ct);
-    }
+    });
 
-    public async Task<string> GetMoneyMonthJsonAsync(DateOnly start, DateOnly end, CancellationToken ct = default)
+    public Task<string> GetMoneyMonthJsonAsync(DateOnly start, DateOnly end, CancellationToken ct = default)
+        => SyncAwaiter.GuardAsync(async () =>
     {
         await using var scope = root.CreateAsyncScope();
         var sp = scope.ServiceProvider;
@@ -47,9 +49,10 @@ public sealed class MacroReadService(IServiceProvider root, IConfiguration confi
             "FROM money_supply_month t " +
             "WHERE (t.stat_year, t.stat_month) >= ({0}, {1}) AND (t.stat_year, t.stat_month) <= ({2}, {3})";
         return await db.Database.SqlQueryRaw<string>(sql, start.Year, start.Month, end.Year, end.Month).FirstAsync(ct);
-    }
+    });
 
-    public async Task<string> GetMoneyYearJsonAsync(int startYear, int endYear, CancellationToken ct = default)
+    public Task<string> GetMoneyYearJsonAsync(int startYear, int endYear, CancellationToken ct = default)
+        => SyncAwaiter.GuardAsync(async () =>
     {
         await using var scope = root.CreateAsyncScope();
         var sp = scope.ServiceProvider;
@@ -67,5 +70,5 @@ public sealed class MacroReadService(IServiceProvider root, IConfiguration confi
             "SELECT COALESCE(json_agg(t ORDER BY t.stat_year), '[]')::text AS \"Value\" " +
             "FROM money_supply_year t WHERE t.stat_year >= {0} AND t.stat_year <= {1}";
         return await db.Database.SqlQueryRaw<string>(sql, startYear, endYear).FirstAsync(ct);
-    }
+    });
 }
