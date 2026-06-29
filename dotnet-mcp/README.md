@@ -53,7 +53,6 @@ MCP 客户端配置示例（Streamable HTTP）：
 | `StockData:FetchBase` | `http://127.0.0.1:8090` | fetch 微服务地址 |
 | `StockData:ApiBase` | `http://127.0.0.1:8080` | 旧 REST 兜底（管线关闭时用） |
 | `StockData:ReadFetchBudgetSeconds` | `30` | 读路径有界抓取预算（秒） |
-| `StockData:Sync:DrainIdleSeconds` | `10` | Drainer 空队列轮询间隔 |
 | `StockData:Sync:MarketRefreshSeconds` | `3600` | 市场级数据自维护间隔 |
 | `StockData:Sync:StaleAfterHours` | `20` | `/sync/refresh` 判过期重排的小时数 |
 | `StockData:FetchHaltPollSeconds` / `FetchRestartCooldownSeconds` | `60` / `600` | halt 监视轮询 / 自动 restart 冷却 |
