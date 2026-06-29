@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -12,8 +11,10 @@ namespace StockData.Mcp.Data;
 ///
 /// pgOnly 模式下两分支决策：
 /// 1. 水位 Fresh（无缺口）→ 立即返回，调用方直读 PG
-/// 2. 不 Fresh → 以 high 优先级主动发起 ensure 抓取缺口（有界预算 ReadFetchBudgetSeconds），
-///    抓取完成后调用方读 PG 全量数据（旧 + 新）；超预算/失败则吞异常回退 PG 现状
+/// 2. 不 Fresh → 以 high 优先级主动发起 ensure 抓取缺口（有界预算 ReadFetchBudgetSeconds）。
+///    抓取完成后调用方读 PG 全量数据（旧 + 新）；**超预算/失败则抛 FetchTimeoutException /
+///    FetchFailedException**——由 <see cref="GuardAsync"/> 兜底转 "Error: ..." 字符串返回调用方，
+///    不再静默回退 PG 现状。
 ///
 /// 非 pgOnly 模式（旧读穿透）→ 直接调用 ensure，行为不变。
 /// </summary>
@@ -76,8 +77,9 @@ internal static class SyncAwaiter
         };
 
     /// <summary>
-    /// 定向高优先有界抓取：Fresh 时跳过；否则以 high 优先级调 ensure 补缺口，
-    /// 预算内完成 → 调用方读到完整数据；超预算/失败 → 吞异常回退 PG 现状。
+    /// 定向高优先有界抓取：Fresh 时跳过；否则以 high 优先级调 ensure 补缺口。
+    /// 预算内完成 → 调用方读到完整数据；**超预算 → 转 FetchTimeoutException 抛出；fetch 失败 →
+    /// FetchFailedException 直接传播**——不再吞异常静默回退 PG，由 <see cref="GuardAsync"/> 兜底。
     /// </summary>
     private static async Task FetchAsync(
         IConfiguration config, ILogger? logger, CancellationToken ct,
@@ -92,19 +94,33 @@ internal static class SyncAwaiter
         if (budget > 0) cts.CancelAfter(TimeSpan.FromSeconds(budget));
         using (FetchPriority.High())
         {
-            var sw = Stopwatch.StartNew();
             try
             {
                 await ensure(cts.Token);
             }
-            catch (Exception ex) when (
-                !ct.IsCancellationRequested &&
-                (ex is FetchTimeoutException or FetchFailedException
-                 || (ex is OperationCanceledException && cts.IsCancellationRequested)))
+            catch (OperationCanceledException) when (cts.IsCancellationRequested && !ct.IsCancellationRequested)
             {
-                logger?.LogWarning("SyncAwaiter 回退 PG：budget={Budget}s elapsed={Elapsed}ms msg={Msg}",
-                    budget, sw.ElapsedMilliseconds, ex.Message);
+                // 读路径 budget 超时：不静默回退，转为 FetchTimeoutException 让调用方知道数据未同步完成
+                logger?.LogWarning("SyncAwaiter budget 超时（{Budget}s），抛出 FetchTimeoutException", budget);
+                throw new FetchTimeoutException($"读路径抓取预算超时（{budget}s），数据未同步完成");
             }
+            // FetchTimeoutException / FetchFailedException 直接向上传播，不再吞掉
+        }
+    }
+
+    /// <summary>
+    /// 读路径统一兜底：抓取失败（<see cref="FetchTimeoutException"/> / <see cref="FetchFailedException"/>）
+    /// → 返回 <c>"Error: 数据同步未完成：..."</c> 字符串。**不静默回退 PG**——调用方（MCP 工具 /
+    /// KlineLoader）据 <c>"Error:"</c> 前缀判失败并透传给客户端。
+    ///
+    /// 各 ReadService 的公开方法用 <c>=> SyncAwaiter.GuardAsync(async () => { ... })</c> 包裹整个方法体。
+    /// </summary>
+    public static async Task<string> GuardAsync(Func<Task<string>> action)
+    {
+        try { return await action(); }
+        catch (Exception ex) when (ex is FetchTimeoutException or FetchFailedException)
+        {
+            return $"Error: 数据同步未完成：{ex.Message}";
         }
     }
 }
