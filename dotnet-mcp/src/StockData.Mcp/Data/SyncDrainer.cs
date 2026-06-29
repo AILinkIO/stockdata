@@ -12,6 +12,9 @@ namespace StockData.Mcp.Data;
 /// - **单实例 = 串行**：配合 fetch 的高/低优先队列（MCP 交互读的 high 任务在 Python 侧插队）。
 /// - **启动回收**：<see cref="ReclaimOrphanedAsync"/> 把遗留的 running 重置为 partial（续传保
 ///   datasets_done），避免单实例被永久卡死。
+/// - **过期重排**：<see cref="RefreshStaleDoneAsync"/> 在 drain 开头把完成早于 StaleAfterHours
+///   的 done 任务重排为 pending（等价 <see cref="SyncRunService.RefreshAsync"/>），让一次性 drain
+///   自包含——cron/TUI 直接跑 drain 就能根据日期推进水线，不依赖先单独调 /sync/refresh。
 /// - **不依赖唤醒信号**：常驻版本用 SyncWakeUp 让 RegisterIfNew 触发立即唤醒；
 ///   一次性模式下 sync-cli 进程级生命周期由 cron 控制，cron 不查库、RegisterIfNew 落库后下次
 ///   cron 触发时 NextDueAsync 自然捡到，无需进程内唤醒通道。
@@ -31,6 +34,7 @@ public sealed class SyncDrainer(
         var lastMarket = DateTimeOffset.MinValue;
         logger.LogInformation("SyncDrainer 启动（一次性 drain）");
         await ReclaimOrphanedAsync(ct);
+        await RefreshStaleDoneAsync(ct);
 
         while (!ct.IsCancellationRequested)
         {
@@ -79,6 +83,25 @@ public sealed class SyncDrainer(
         var n = await db.Database.ExecuteSqlRawAsync(
             "UPDATE stock_sync_task SET status = 'partial', updated_at = now() WHERE status = 'running'", ct);
         if (n > 0) logger.LogInformation("回收 {N} 个孤儿 running 任务为 partial（续传）", n);
+    }
+
+    /// <summary>
+    /// drain 开头：把完成早于 <c>StaleAfterHours</c> 的 done 任务重排为 pending（等价
+    /// <see cref="SyncRunService.RefreshAsync"/>）。一次性 drain 自包含——cron/TUI 直接跑 drain
+    /// 就能根据日期推进水线，不依赖先单独调 <c>/sync/refresh</c>。
+    /// 幂等：只一条 UPDATE，过期才重排，未过期的 done 不动。
+    /// </summary>
+    private async Task RefreshStaleDoneAsync(CancellationToken ct)
+    {
+        var staleHours = config.GetValue("StockData:Sync:StaleAfterHours", 20);
+        await using var scope = root.CreateAsyncScope();
+        var time = scope.ServiceProvider.GetRequiredService<TimeProvider>();
+        var db = scope.ServiceProvider.GetRequiredService<StockDataDbContext>();
+        var cutoff = time.GetUtcNow().AddHours(-staleHours);
+        var n = await db.Database.ExecuteSqlRawAsync(
+            "UPDATE stock_sync_task SET status = 'pending', updated_at = now() WHERE status = 'done' AND finished_at < {0}",
+            new object[] { cutoff }, ct);
+        if (n > 0) logger.LogInformation("重排 {N} 个过期 done 任务为 pending（stale_after {H}h）", n, staleHours);
     }
 
     private async Task<(string Code, string Kind)?> NextDueAsync(CancellationToken ct)
