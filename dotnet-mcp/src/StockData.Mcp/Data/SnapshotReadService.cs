@@ -13,7 +13,8 @@ public sealed class SnapshotReadService(IServiceProvider root, IConfiguration co
     // 快照三件套均为市场级数据（无单票 code），ServeFromPgOnly 下纯读，缺口由 /sync/market 补（P2）
     private bool ServeFromPgOnly => config.GetValue<bool>("StockData:ServeFromPgOnly");
 
-    public async Task<string> StockListJsonAsync(DateOnly? snapDate, CancellationToken ct = default)
+    public Task<string> StockListJsonAsync(DateOnly? snapDate, CancellationToken ct = default)
+        => SyncAwaiter.GuardAsync(async () =>
     {
         await using var scope = root.CreateAsyncScope();
         var sp = scope.ServiceProvider;
@@ -42,9 +43,10 @@ public sealed class SnapshotReadService(IServiceProvider root, IConfiguration co
             sd = prev;
         }
         return "[]";
-    }
+    });
 
-    public async Task<string> IndexConstituentsJsonAsync(string indexCode, DateOnly? snapDate, CancellationToken ct = default)
+    public Task<string> IndexConstituentsJsonAsync(string indexCode, DateOnly? snapDate, CancellationToken ct = default)
+        => SyncAwaiter.GuardAsync(async () =>
     {
         await using var scope = root.CreateAsyncScope();
         var sp = scope.ServiceProvider;
@@ -63,9 +65,10 @@ public sealed class SnapshotReadService(IServiceProvider root, IConfiguration co
             "'code',t.code,'code_name',t.code_name) ORDER BY t.code),'[]')::text AS \"Value\" " +
             "FROM index_constituent t WHERE t.index_code = {0} AND t.snap_date = {1}";
         return await db.Database.SqlQueryRaw<string>(sql, indexCode, sd).FirstAsync(ct);
-    }
+    });
 
-    public async Task<string> IndustryJsonAsync(string? code, DateOnly? snapDate, CancellationToken ct = default)
+    public Task<string> IndustryJsonAsync(string? code, DateOnly? snapDate, CancellationToken ct = default)
+        => SyncAwaiter.GuardAsync(async () =>
     {
         await using var scope = root.CreateAsyncScope();
         var sp = scope.ServiceProvider;
@@ -86,7 +89,7 @@ public sealed class SnapshotReadService(IServiceProvider root, IConfiguration co
         return code is null
             ? await db.Database.SqlQueryRaw<string>(sql, sd).FirstAsync(ct)
             : await db.Database.SqlQueryRaw<string>(sql, sd, code).FirstAsync(ct);
-    }
+    });
 
     // snap_date 缺省 → 最近交易日（≤今天）；显式给定则原样。pgOnly 下不补日历（靠 /sync/market）
     private static async Task<DateOnly?> Resolve(IServiceProvider sp, DateOnly? snapDate, DateTimeOffset now, bool pgOnly, CancellationToken ct)

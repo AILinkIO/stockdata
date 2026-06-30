@@ -32,41 +32,47 @@ public sealed class TradingDaysReadService(IServiceProvider root, IConfiguration
 
     private static DateOnly Today() => Coverage.Today(TimeProvider.System.GetUtcNow());
 
-    public async Task<string> LatestTradingDateAsync(CancellationToken ct = default)
+    public Task<string> LatestTradingDateAsync(CancellationToken ct = default)
+        => SyncAwaiter.GuardAsync(async () =>
     {
         var t = Today();
         var days = await TradingDaysAsync(t.AddDays(-Lookback), t, ct);
         return days.Count == 0 ? "Error: 交易日历数据缺失" : Obj(("date", Iso(days[^1])));
-    }
+    });
 
-    public async Task<string> IsTradingDayAsync(DateOnly d, CancellationToken ct = default)
+    public Task<string> IsTradingDayAsync(DateOnly d, CancellationToken ct = default)
+        => SyncAwaiter.GuardAsync(async () =>
     {
         var days = await TradingDaysAsync(d, d, ct);
         return $$"""{"date":"{{Iso(d)}}","is_trading_day":{{(days.Count > 0 ? "true" : "false")}}}""";
-    }
+    });
 
-    public async Task<string> PreviousTradingDayAsync(DateOnly d, CancellationToken ct = default)
+    public Task<string> PreviousTradingDayAsync(DateOnly d, CancellationToken ct = default)
+        => SyncAwaiter.GuardAsync(async () =>
     {
         var days = await TradingDaysAsync(d.AddDays(-Lookback), d.AddDays(-1), ct);
         return days.Count == 0 ? $"Error: {Iso(d)} 之前 {Lookback} 天内无交易日" : Obj(("date", Iso(days[^1])));
-    }
+    });
 
-    public async Task<string> NextTradingDayAsync(DateOnly d, CancellationToken ct = default)
+    public Task<string> NextTradingDayAsync(DateOnly d, CancellationToken ct = default)
+        => SyncAwaiter.GuardAsync(async () =>
     {
         var days = await TradingDaysAsync(d.AddDays(1), d.AddDays(Lookback), ct);
         return days.Count == 0 ? $"Error: {Iso(d)} 之后 {Lookback} 天内无交易日" : Obj(("date", Iso(days[0])));
-    }
+    });
 
-    public async Task<string> LastNTradingDaysAsync(int n, CancellationToken ct = default)
+    public Task<string> LastNTradingDaysAsync(int n, CancellationToken ct = default)
+        => SyncAwaiter.GuardAsync(async () =>
     {
         if (n <= 0) return "Error: days 必须为正数";
         var t = Today();
         var days = await TradingDaysAsync(t.AddDays(-(n * 3 + Lookback)), t, ct);
         var last = days.Count > n ? days[^n..] : days;
         return $$"""{"dates":[{{string.Join(",", last.Select(d => $"\"{Iso(d)}\""))}}]}""";
-    }
+    });
 
-    public async Task<string> RecentRangeAsync(int n, CancellationToken ct = default)
+    public Task<string> RecentRangeAsync(int n, CancellationToken ct = default)
+        => SyncAwaiter.GuardAsync(async () =>
     {
         if (n <= 0) return "Error: days 必须为正数";
         var t = Today();
@@ -74,7 +80,7 @@ public sealed class TradingDaysReadService(IServiceProvider root, IConfiguration
         if (days.Count == 0) return "Error: 交易日历数据缺失";
         var last = days.Count > n ? days[^n..] : days;
         return $$"""{"start_date":"{{Iso(last[0])}}","end_date":"{{Iso(last[^1])}}"}""";
-    }
+    });
 
     private static string Iso(DateOnly d) => d.ToString("yyyy-MM-dd");
     private static string Obj(params (string K, string V)[] kv)

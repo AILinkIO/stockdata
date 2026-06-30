@@ -16,7 +16,8 @@ public sealed class DividendReadService(IServiceProvider root, IConfiguration co
     public bool Enabled => config.GetValue<bool>("StockData:PipelineEnabled");
     private bool ServeFromPgOnly => config.GetValue<bool>("StockData:ServeFromPgOnly");
 
-    public async Task<string> GetJsonAsync(string code, int year, string yearType, CancellationToken ct = default)
+    public Task<string> GetJsonAsync(string code, int year, string yearType, CancellationToken ct = default)
+        => SyncAwaiter.GuardAsync(async () =>
     {
         await using var scope = root.CreateAsyncScope();
         var sp = scope.ServiceProvider;
@@ -39,7 +40,7 @@ public sealed class DividendReadService(IServiceProvider root, IConfiguration co
             .ToListAsync(ct);
 
         return Serialize(rows);
-    }
+    });
 
     internal static string Serialize(IReadOnlyList<Dividend> rows)
     {

@@ -16,7 +16,8 @@ public sealed class TradeCalendarReadService(IServiceProvider root, IConfigurati
     public bool Enabled => config.GetValue<bool>("StockData:PipelineEnabled");
     private bool ServeFromPgOnly => config.GetValue<bool>("StockData:ServeFromPgOnly");
 
-    public async Task<string> GetJsonAsync(DateOnly start, DateOnly end, CancellationToken ct = default)
+    public Task<string> GetJsonAsync(DateOnly start, DateOnly end, CancellationToken ct = default)
+        => SyncAwaiter.GuardAsync(async () =>
     {
         await using var scope = root.CreateAsyncScope();
         var sp = scope.ServiceProvider;
@@ -36,7 +37,7 @@ public sealed class TradeCalendarReadService(IServiceProvider root, IConfigurati
             .ToListAsync(ct);
 
         return Serialize(rows);
-    }
+    });
 
     internal static string Serialize(IReadOnlyList<TradeCalendar> rows)
     {

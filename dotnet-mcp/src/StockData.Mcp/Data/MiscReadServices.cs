@@ -11,7 +11,8 @@ public sealed class AdjustFactorReadService(IServiceProvider root, IConfiguratio
     public bool Enabled => config.GetValue<bool>("StockData:PipelineEnabled");
     private bool ServeFromPgOnly => config.GetValue<bool>("StockData:ServeFromPgOnly");
 
-    public async Task<string> GetJsonAsync(string code, DateOnly start, DateOnly end, CancellationToken ct = default)
+    public Task<string> GetJsonAsync(string code, DateOnly start, DateOnly end, CancellationToken ct = default)
+        => SyncAwaiter.GuardAsync(async () =>
     {
         await using var scope = root.CreateAsyncScope();
         var sp = scope.ServiceProvider;
@@ -30,7 +31,7 @@ public sealed class AdjustFactorReadService(IServiceProvider root, IConfiguratio
             "'adjust_factor',t.adjust_factor) ORDER BY t.divid_operate_date),'[]')::text AS \"Value\" " +
             "FROM adjust_factor t WHERE t.code = {0} AND t.divid_operate_date >= {1} AND t.divid_operate_date <= {2}";
         return await db.Database.SqlQueryRaw<string>(sql, code, start, end).FirstAsync(ct);
-    }
+    });
 }
 
 /// <summary>
@@ -53,6 +54,7 @@ public sealed class StockAnalysisService(
         var sb = new StringBuilder();
 
         var basicJson = await basic.GetJsonAsync(c, ct);
+        if (basicJson.StartsWith("Error:")) return basicJson;
         string? name = null, ipo = null;
         if (TryObj(basicJson, out var b))
         {
@@ -67,6 +69,7 @@ public sealed class StockAnalysisService(
         if (name is not null)
         {
             var indJson = await snap.IndustryJsonAsync(c, null, ct);
+            if (indJson.StartsWith("Error:")) return indJson;
             var industry = FirstStr(indJson, "industry") ?? "未知";
             sb.Append("## 公司基本信息\n");
             sb.Append($"- 股票代码: {code}\n- 股票名称: {stockName}\n- 所属行业: {industry}\n- 上市日期: {ipo ?? "未知"}\n\n");
@@ -76,10 +79,12 @@ public sealed class StockAnalysisService(
         {
             var (year, quarter) = (today.Year, (today.Month - 1) / 3 + 1);
             var rows = await fin.GetQuarterlyJsonAsync(c, year, quarter, null, ct);
+            if (rows.StartsWith("Error:")) return rows;
             if (!HasItems(rows))
             {
                 (year, quarter) = quarter == 1 ? (year - 1, 4) : (year, quarter - 1);
                 rows = await fin.GetQuarterlyJsonAsync(c, year, quarter, null, ct);
+                if (rows.StartsWith("Error:")) return rows;
             }
             if (HasItems(rows))
             {
@@ -99,6 +104,7 @@ public sealed class StockAnalysisService(
         if (analysisType is "technical" or "comprehensive")
         {
             var klineJson = await kline.GetHistoricalJsonAsync(c, "d", today.AddDays(-180), today, "2", ct);
+            if (klineJson.StartsWith("Error:")) return klineJson;
             var closes = Closes(klineJson);
             if (closes.Count > 0)
             {

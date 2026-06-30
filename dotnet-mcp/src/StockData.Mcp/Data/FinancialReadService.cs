@@ -19,7 +19,8 @@ public sealed class FinancialReadService(IServiceProvider root, IConfiguration c
     public bool Enabled => config.GetValue<bool>("StockData:PipelineEnabled");
     private bool ServeFromPgOnly => config.GetValue<bool>("StockData:ServeFromPgOnly");
 
-    public async Task<string> GetQuarterlyJsonAsync(string code, int year, int quarter, string? reportType, CancellationToken ct = default)
+    public Task<string> GetQuarterlyJsonAsync(string code, int year, int quarter, string? reportType, CancellationToken ct = default)
+        => SyncAwaiter.GuardAsync(async () =>
     {
         await using var scope = root.CreateAsyncScope();
         var sp = scope.ServiceProvider;
@@ -41,9 +42,10 @@ public sealed class FinancialReadService(IServiceProvider root, IConfiguration c
             w.WriteEndArray();
         }
         return Encoding.UTF8.GetString(buf.WrittenSpan);
-    }
+    });
 
-    public async Task<string> GetPerformanceJsonAsync(string code, string reportType, DateOnly start, DateOnly end, CancellationToken ct = default)
+    public Task<string> GetPerformanceJsonAsync(string code, string reportType, DateOnly start, DateOnly end, CancellationToken ct = default)
+        => SyncAwaiter.GuardAsync(async () =>
     {
         await using var scope = root.CreateAsyncScope();
         var sp = scope.ServiceProvider;
@@ -76,9 +78,10 @@ public sealed class FinancialReadService(IServiceProvider root, IConfiguration c
             w.WriteEndArray();
         }
         return Encoding.UTF8.GetString(buf.WrittenSpan);
-    }
+    });
 
-    public async Task<string> GetIndicatorJsonAsync(string code, DateOnly start, DateOnly end, CancellationToken ct = default)
+    public Task<string> GetIndicatorJsonAsync(string code, DateOnly start, DateOnly end, CancellationToken ct = default)
+        => SyncAwaiter.GuardAsync(async () =>
     {
         await using var scope = root.CreateAsyncScope();
         var sp = scope.ServiceProvider;
@@ -115,7 +118,7 @@ public sealed class FinancialReadService(IServiceProvider root, IConfiguration c
             w.WriteEndArray();
         }
         return Encoding.UTF8.GetString(buf.WrittenSpan);
-    }
+    });
 
     private static Task<List<FinancialReport>> ReadQuarter(StockDataDbContext db, string code, int year, int quarter, string? reportType, CancellationToken ct)
     {

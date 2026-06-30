@@ -17,7 +17,8 @@ public sealed class StockBasicReadService(IServiceProvider root, IConfiguration 
     public bool Enabled => config.GetValue<bool>("StockData:PipelineEnabled");
     private bool ServeFromPgOnly => config.GetValue<bool>("StockData:ServeFromPgOnly");
 
-    public async Task<string> GetJsonAsync(string code, CancellationToken ct = default)
+    public Task<string> GetJsonAsync(string code, CancellationToken ct = default)
+        => SyncAwaiter.GuardAsync(async () =>
     {
         await using var scope = root.CreateAsyncScope();
         var sp = scope.ServiceProvider;
@@ -34,7 +35,7 @@ public sealed class StockBasicReadService(IServiceProvider root, IConfiguration 
 
         var r = await db.StockBasics.AsNoTracking().FirstOrDefaultAsync(x => x.Code == code, ct);
         return r is null ? "null" : Serialize(r);
-    }
+    });
 
     internal static string Serialize(StockBasic r)
     {
