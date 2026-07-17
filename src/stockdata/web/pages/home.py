@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import re
 
-import httpx
 from nicegui import ui
 
 from stockdata.config import settings
 from stockdata.db import queries
+from stockdata.sync.engine import RunParams, read_halt
 
+from .. import state
 from .common import nav
 
 _CODE_RE = re.compile(r"^(sh|sz)\.\d{6}$")
@@ -71,18 +72,22 @@ def watch_table() -> None:
         return
 
     def sync_one(code: str) -> None:
-        try:
-            resp = httpx.post(
-                f"http://127.0.0.1:{settings.web_port}/api/sync/run",
-                json={"codes": [code]},
-                timeout=5,
+        # 直接调进程内 runner——在事件循环里 httpx.post 回自己会阻塞环路造成自我死锁
+        import psycopg
+
+        with psycopg.connect(settings.pg_conninfo) as conn:
+            halt = read_halt(conn)
+        if halt:
+            ui.notify(
+                f"处于熔断状态：{halt.get('reason', '?')}（先在「同步」页清除）",
+                type="warning",
             )
-            if resp.status_code == 202:
-                ui.notify(f"已启动 {code} 的同步，进度见「同步」页", type="positive")
-            else:
-                ui.notify(resp.json().get("detail", "启动失败"), type="warning")
-        except httpx.HTTPError as e:
-            ui.notify(f"请求失败: {e}", type="negative")
+            return
+        ok, msg = state.get_runner().start(RunParams(codes=[code]))
+        ui.notify(
+            f"已启动 {code} 的同步，进度见「同步」页" if ok else f"未启动：{msg}",
+            type="positive" if ok else "warning",
+        )
 
     def remove(code: str) -> None:
         queries.remove_watch(code)
@@ -92,8 +97,10 @@ def watch_table() -> None:
     columns = [
         {"name": "code", "label": "代码", "field": "code", "align": "left"},
         {"name": "code_name", "label": "名称", "field": "code_name", "align": "left"},
-        {"name": "k_d_until", "label": "日K水位", "field": "k_d_until", "align": "left"},
-        {"name": "k_5_until", "label": "5分水位", "field": "k_5_until", "align": "left"},
+        {"name": "k_d_until", "label": "日K", "field": "k_d_until", "align": "left"},
+        {"name": "k_w_until", "label": "周K", "field": "k_w_until", "align": "left"},
+        {"name": "k_30_until", "label": "30分", "field": "k_30_until", "align": "left"},
+        {"name": "k_5_until", "label": "5分", "field": "k_5_until", "align": "left"},
         {"name": "actions", "label": "", "field": "code"},
     ]
     table_rows = [
@@ -101,6 +108,8 @@ def watch_table() -> None:
             "code": r["code"],
             "code_name": r["code_name"] or "—",
             "k_d_until": str(r["k_d_until"] or "未同步"),
+            "k_w_until": str(r["k_w_until"] or "未同步"),
+            "k_30_until": str(r["k_30_until"] or "未同步"),
             "k_5_until": str(r["k_5_until"] or "未同步"),
         }
         for r in rows

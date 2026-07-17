@@ -27,17 +27,21 @@ def remove_watch(code: str) -> None:
 
 
 def watchlist_overview() -> list[dict[str, Any]]:
-    """关注列表 + 各码名称与 k_d / k_5 水位新鲜度。"""
+    """关注列表 + 各码名称与四种 K 线（日/周/5分/30分）水位新鲜度。"""
     sql = """
         SELECT w.code,
                COALESCE(s.code_name, '') AS code_name,
                w.added_at,
-               d.last_date  AS k_d_until,
-               m.last_date  AS k_5_until
+               d.last_date   AS k_d_until,
+               wk.last_date  AS k_w_until,
+               m5.last_date  AS k_5_until,
+               m30.last_date AS k_30_until
         FROM watchlist w
         LEFT JOIN security s ON s.code = w.code
-        LEFT JOIN sync_watermark d ON d.code = w.code AND d.dataset = 'k_d'
-        LEFT JOIN sync_watermark m ON m.code = w.code AND m.dataset = 'k_5'
+        LEFT JOIN sync_watermark d   ON d.code   = w.code AND d.dataset   = 'k_d'
+        LEFT JOIN sync_watermark wk  ON wk.code  = w.code AND wk.dataset  = 'k_w'
+        LEFT JOIN sync_watermark m5  ON m5.code  = w.code AND m5.dataset  = 'k_5'
+        LEFT JOIN sync_watermark m30 ON m30.code = w.code AND m30.dataset = 'k_30'
         ORDER BY w.code
     """
     with get_pool().connection() as conn:
@@ -45,7 +49,8 @@ def watchlist_overview() -> list[dict[str, Any]]:
     return [
         {
             "code": r[0], "code_name": r[1], "added_at": r[2],
-            "k_d_until": r[3], "k_5_until": r[4],
+            "k_d_until": r[3], "k_w_until": r[4],
+            "k_5_until": r[5], "k_30_until": r[6],
         }
         for r in rows
     ]
@@ -89,6 +94,64 @@ def load_kline(code: str, frequency: str, start: date, end: date) -> pd.DataFram
     return pd.DataFrame(
         rows, columns=["t", "open", "high", "low", "close", "volume", "amount"]
     )
+
+
+def security_info(code: str) -> dict[str, Any] | None:
+    """单票基本信息：security + 最新行业快照。"""
+    sql = """
+        SELECT s.code, s.code_name, s.ipo_date, s.out_date, s.type, s.status,
+               i.industry, i.industry_classification, i.snap_date
+        FROM security s
+        LEFT JOIN LATERAL (
+            SELECT industry, industry_classification, snap_date
+            FROM stock_industry WHERE code = s.code
+            ORDER BY snap_date DESC LIMIT 1
+        ) i ON true
+        WHERE s.code = %s
+    """
+    with get_pool().connection() as conn:
+        r = conn.execute(sql, (code,)).fetchone()
+    if r is None:
+        return None
+    return {
+        "code": r[0], "code_name": r[1],
+        "ipo_date": _iso(r[2]), "out_date": _iso(r[3]),
+        "type": r[4], "status": r[5],
+        "industry": r[6], "industry_classification": r[7],
+        "industry_snap_date": _iso(r[8]),
+    }
+
+
+def financial_reports(code: str, report_type: str) -> list[dict[str, Any]]:
+    """某类财报（profit/operation/growth/balance/cash_flow/dupont/
+    performance_express/forecast），按报告期倒序。"""
+    with get_pool().connection() as conn:
+        rows = conn.execute(
+            "SELECT stat_date, pub_date, metrics FROM financial_report "
+            "WHERE code = %s AND report_type = %s ORDER BY stat_date DESC",
+            (code, report_type),
+        ).fetchall()
+    return [
+        {"stat_date": _iso(r[0]), "pub_date": _iso(r[1]), "metrics": r[2]}
+        for r in rows
+    ]
+
+
+def dividends(code: str) -> list[dict[str, Any]]:
+    """分红除权记录，按预案公告日倒序。"""
+    with get_pool().connection() as conn:
+        rows = conn.execute(
+            "SELECT plan_announce_date, year_type, operate_date, detail "
+            "FROM dividend WHERE code = %s ORDER BY plan_announce_date DESC",
+            (code,),
+        ).fetchall()
+    return [
+        {
+            "plan_announce_date": _iso(r[0]), "year_type": r[1],
+            "operate_date": _iso(r[2]), "detail": r[3],
+        }
+        for r in rows
+    ]
 
 
 def load_adjust_factors(code: str) -> pd.DataFrame:
