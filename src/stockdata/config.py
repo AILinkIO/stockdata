@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     web_host: str = "0.0.0.0"
     web_port: int = 8050
     app_base: str = "http://127.0.0.1:8050"  # CLI 客户端连接的服务地址
+    api_key: str = ""  # /api/v1 数据面鉴权：空=关闭；配置后要求 X-API-Key 头
 
     # ── baostock ──
     baostock_socket_timeout: int = 30  # TCP 超时：挂死靠它快速失败重连
