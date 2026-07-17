@@ -118,6 +118,19 @@ def recent_runs(limit: int = 10) -> list[dict[str, Any]]:
     ]
 
 
+def market_watermarks() -> dict[str, dict[str, Any]]:
+    """市场级数据集（code=''）的水位，按 dataset 索引。"""
+    with get_pool().connection() as conn:
+        rows = conn.execute(
+            "SELECT dataset, last_date, last_synced_at "
+            "FROM sync_watermark WHERE code = ''"
+        ).fetchall()
+    return {
+        r[0]: {"last_date": _iso(r[1]), "last_synced_at": _iso(r[2])}
+        for r in rows
+    }
+
+
 def watermark_summary() -> dict[str, Any]:
     """全库水位概览：每数据集的覆盖码数与最旧/最新 last_date。"""
     with get_pool().connection() as conn:
