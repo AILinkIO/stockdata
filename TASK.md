@@ -29,6 +29,13 @@ stockdata_e2e 库 + FakeProvider）。
 - ✅ 统一信封 `{"data", "meta"}`；`STOCKDATA_API_KEY` 空=不鉴权，配置后强制 `X-API-Key`
 - ✅ 集成测试 15 例（FakeProvider 种子一次，模块级共享只读）；README「数据面 API」章节
 
+## 已完成（2026-07-17 崩溃恢复）
+
+- ✅ 启动收尾 + 自动续跑：`recover_interrupted_run`（advisory lock 保护，孤儿
+  running → interrupted）；runner 关停打断改标 interrupted；`init_runner` 里
+  最新 interrupted 自动以原参数续跑（stopped/halted/done 不续）；
+  开关 `STOCKDATA_RESUME_INTERRUPTED_ON_START`；测试 5 例（61 全过）
+
 ## 待办 / 后续可选
 
 - ⬜ 首次全量同步（建议先 `--watchlist-only` 或分夜跑全市场，预期见 README 表格）
