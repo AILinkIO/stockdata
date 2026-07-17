@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     app_base: str = "http://127.0.0.1:8050"  # CLI 客户端连接的服务地址
     api_key: str = ""  # /api/v1 数据面鉴权：空=关闭；配置后要求 X-API-Key 头
 
+    # ── 崩溃恢复：启动时把遗留 running 任务收尾成 interrupted 并自动续跑 ──
+    resume_interrupted_on_start: bool = True
+
     # ── baostock ──
     baostock_socket_timeout: int = 30  # TCP 超时：挂死靠它快速失败重连
 
