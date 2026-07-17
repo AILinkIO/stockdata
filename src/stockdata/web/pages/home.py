@@ -15,16 +15,41 @@ from .common import nav
 
 _CODE_RE = re.compile(r"^(sh|sz)\.\d{6}$")
 
+# A 股红涨绿跌（与 charts.py 同色）
+_UP, _DOWN = "#ef232a", "#14b143"
+
+
+def _sparkline_svg(closes: list[float], w: int = 110, h: int = 28) -> str:
+    """近 N 日收盘迷你走势（内联 SVG，红涨绿跌看首尾）。"""
+    if len(closes) < 2:
+        return ""
+    lo, hi = min(closes), max(closes)
+    span = (hi - lo) or 1.0
+    step = (w - 2) / (len(closes) - 1)
+    pts = " ".join(
+        f"{1 + i * step:.1f},{h - 2 - (c - lo) / span * (h - 4):.1f}"
+        for i, c in enumerate(closes)
+    )
+    color = _UP if closes[-1] >= closes[0] else _DOWN
+    return (
+        f'<svg width="{w}" height="{h}" xmlns="http://www.w3.org/2000/svg">'
+        f'<polyline fill="none" stroke="{color}" stroke-width="1.5" '
+        f'points="{pts}"/></svg>'
+    )
+
 
 @ui.page("/")
 def home_page() -> None:
     nav("home")
-    with ui.column().classes("w-full max-w-4xl mx-auto p-4 gap-4"):
+    with ui.column().classes("w-full max-w-6xl mx-auto p-4 gap-4"):
         with ui.row().classes("w-full items-center justify-between"):
             ui.label("关注列表").classes("text-2xl font-bold")
-            ui.button("添加股票", icon="add", on_click=_open_add_dialog).props(
-                "color=primary"
-            )
+            with ui.row().classes("gap-2"):
+                ui.button("批量导入", icon="playlist_add",
+                          on_click=_open_batch_dialog).props("color=primary outline")
+                ui.button("添加股票", icon="add", on_click=_open_add_dialog).props(
+                    "color=primary"
+                )
         ui.label(
             "添加代码只登记关注，不触发抓取；数据由「同步」页或 CLI 启动的同步任务灌入。"
             "点击行可查看 K 线与完整历史数据。"
@@ -64,6 +89,45 @@ def _open_add_dialog() -> None:
     dialog.open()
 
 
+def _open_batch_dialog() -> None:
+    with ui.dialog() as dialog, ui.card().classes("w-[480px] max-w-full"):
+        ui.label("批量导入").classes("text-lg font-bold")
+        ui.label("粘贴代码列表，逗号/空格/换行分隔，如 sh.600000, sz.000001").classes(
+            "text-sm text-gray-500"
+        )
+        box = ui.textarea(placeholder="sh.600000\nsz.000001\nsh.600050").classes(
+            "w-full"
+        ).props("rows=8")
+
+        def submit() -> None:
+            tokens = [t for t in re.split(r"[\s,;，；]+", box.value or "") if t]
+            added, invalid, dup = [], [], []
+            seen: set[str] = set()
+            for t in tokens:
+                code = t.strip().lower()
+                if not _CODE_RE.match(code):
+                    invalid.append(t)
+                    continue
+                if code in seen:
+                    dup.append(code)
+                    continue
+                seen.add(code)
+                queries.add_watch(code, "")
+                added.append(code)
+            dialog.close()
+            watch_table.refresh()
+            msg = f"已导入 {len(added)} 只"
+            if invalid:
+                msg += f"；格式不合法 {len(invalid)} 条（{'、'.join(invalid[:3])}…）" \
+                    if len(invalid) > 3 else f"；格式不合法：{'、'.join(invalid)}"
+            ui.notify(msg, type="positive" if added else "warning")
+
+        with ui.row().classes("w-full justify-end gap-2 mt-2"):
+            ui.button("取消", on_click=dialog.close).props("flat")
+            ui.button("导入", on_click=submit).props("color=primary")
+    dialog.open()
+
+
 @ui.refreshable
 def watch_table() -> None:
     rows = queries.watchlist_overview()
@@ -97,6 +161,9 @@ def watch_table() -> None:
     columns = [
         {"name": "code", "label": "代码", "field": "code", "align": "left"},
         {"name": "code_name", "label": "名称", "field": "code_name", "align": "left"},
+        {"name": "close", "label": "现价", "field": "close", "align": "right"},
+        {"name": "pct", "label": "涨跌幅", "field": "pct", "align": "right"},
+        {"name": "spark", "label": "近30日", "field": "spark", "align": "center"},
         {"name": "k_d_until", "label": "日K", "field": "k_d_until", "align": "left"},
         {"name": "k_w_until", "label": "周K", "field": "k_w_until", "align": "left"},
         {"name": "k_30_until", "label": "30分", "field": "k_30_until", "align": "left"},
@@ -107,6 +174,12 @@ def watch_table() -> None:
         {
             "code": r["code"],
             "code_name": r["code_name"] or "—",
+            "close": f"{r['last_close']:.2f}" if r["last_close"] is not None else "—",
+            "pct": (f"{r['last_pct_chg']:+.2f}%"
+                    if r["last_pct_chg"] is not None else "—"),
+            "pct_cls": ("text-red-600" if (r["last_pct_chg"] or 0) >= 0
+                        else "text-green-600"),
+            "spark": _sparkline_svg(r["recent_closes"]),
             "k_d_until": str(r["k_d_until"] or "未同步"),
             "k_w_until": str(r["k_w_until"] or "未同步"),
             "k_30_until": str(r["k_30_until"] or "未同步"),
@@ -118,6 +191,22 @@ def watch_table() -> None:
         ui.table(columns=columns, rows=table_rows, row_key="code")
         .classes("w-full cursor-pointer")
         .props("hover")
+    )
+    table.add_slot(
+        "body-cell-pct",
+        """
+        <q-td :props="props" class="text-right">
+            <span :class="props.row.pct_cls">{{ props.row.pct }}</span>
+        </q-td>
+        """,
+    )
+    table.add_slot(
+        "body-cell-spark",
+        """
+        <q-td :props="props" class="text-center">
+            <div v-html="props.row.spark"></div>
+        </q-td>
+        """,
     )
     table.add_slot(
         "body-cell-actions",

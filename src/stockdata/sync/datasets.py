@@ -253,6 +253,11 @@ class KlineHandler:
             settled_weekly(ctx.today) if self.frequency == "w" else settled_daily(ctx.today)
         )
         start = ctx.resume_start(floor)
+        # 尾部修正：已有水位时把起点拉回最近 N 天，覆盖盘后修正（upsert 幂等；
+        # 稳态增量本就一片一调用，窗口拉宽不增加调用数）
+        tail = ctx.settings.tail_refresh_days
+        if tail > 0 and ctx.wm is not None and ctx.wm.last_date is not None:
+            start = min(start, max(floor, end - timedelta(days=tail - 1)))
         if start > end:
             return []
         span = ctx.settings.kline_slice_days

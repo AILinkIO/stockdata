@@ -1,0 +1,36 @@
+# CI：PG service + uv + 全套 pytest（单测零网络；集成测试走 stockdata_e2e 库）
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: stockdata
+          POSTGRES_PASSWORD: stockdata
+          POSTGRES_DB: stockdata_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U stockdata"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      STOCKDATA_TEST_PG_DSN: postgresql://stockdata:stockdata@127.0.0.1:5432/stockdata_e2e
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: 安装依赖（uv 自动装 python 3.13）
+        run: uv sync --frozen
+      - name: 全套测试
+        run: uv run pytest -q

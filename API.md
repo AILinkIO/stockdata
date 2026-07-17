@@ -189,6 +189,19 @@ body：`{ "codes": [...], "year": 2025 }`。
 `start`/`end` 按 `date_key` 文本序过滤（`date_key` 为 `YYYY-MM-DD` / `YYYY-MM` / `YYYY`，
 视 kind 而定），其余字段为 baostock 原始载荷平铺。
 
+### GET /api/v1/meta/gaps
+
+日 K 缺口体检：`code` 必填。返回水位覆盖区间内「是交易日但无 K 线行」的日期列表
+（`limit` 默认 500）。**缺口 = 停牌日（合法缺行）或真实缺数，需人工判断**；
+价值在于缺口数量异常（连续大段）时报警。
+
+```json
+{ "data": ["2026-06-01", "2026-06-02"],
+  "meta": { "code": "sh.600050", "first_date": "2002-10-09",
+            "last_date": "2026-07-16", "trading_days": 5775,
+            "missing_count": 2, "truncated": false } }
+```
+
 ### GET /api/v1/meta/watermarks
 
 数据新鲜度：每 (code, dataset) 一行，市场级数据集 `code=""`。

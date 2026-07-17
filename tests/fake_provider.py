@@ -34,10 +34,12 @@ class FakeProvider:
         codes: tuple[str, ...] = ("sh.600000", "sz.000001"),
         ipo: date = date(2024, 1, 1),
         horizon: date = date(2026, 7, 16),
+        index_codes: tuple[str, ...] = (),   # 视为指数（type=2）
     ) -> None:
         self.codes = codes
         self.ipo = ipo
         self.horizon = horizon
+        self.index_codes = index_codes
         self.calls: list[tuple[str, dict]] = []
         self.hooks: list = []  # callable(method, kwargs)，可 raise
 
@@ -100,7 +102,8 @@ class FakeProvider:
     def query_stock_basic(self, code: str = ""):
         self._rec("query_stock_basic", code=code)
         rows = [
-            [c, f"股票{i}", self.ipo.isoformat(), "", "1", "1"]
+            [c, f"股票{i}", self.ipo.isoformat(), "",
+             "2" if c in self.index_codes else "1", "1"]
             for i, c in enumerate(self.codes)
             if not code or c == code
         ]

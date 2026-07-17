@@ -161,10 +161,41 @@ def test_macro(api):
     assert api.get("/api/v1/macro/nope").status_code == 422
 
 
+def test_kline_gaps(api, pg_dsn):
+    import psycopg
+
+    r = api.get("/api/v1/meta/gaps", params={"code": "sh.600000"}).json()
+    assert r["meta"]["missing_count"] == 0 and r["meta"]["trading_days"] > 200
+
+    # 人工挖两个洞 → 体检应报出来
+    with psycopg.connect(pg_dsn, autocommit=True) as conn:
+        holes = conn.execute(
+            "DELETE FROM kline WHERE code='sh.600000' AND frequency='d' "
+            "AND trade_date IN ('2026-06-01', '2026-06-02') RETURNING trade_date"
+        ).fetchall()
+    assert len(holes) == 2
+    r = api.get("/api/v1/meta/gaps", params={"code": "sh.600000"}).json()
+    assert r["meta"]["missing_count"] == 2
+    assert r["data"] == ["2026-06-01", "2026-06-02"]
+
+    # 未同步过的码：空结果而非报错
+    r = api.get("/api/v1/meta/gaps", params={"code": "sh.999999"}).json()
+    assert r["meta"]["missing_count"] == 0 and r["meta"]["last_date"] is None
+
+
 def test_watermarks(api):
     r = api.get("/api/v1/meta/watermarks", params={"dataset": "k_d"}).json()
     assert r["meta"]["total"] == 2
     assert {w["code"] for w in r["data"]} == {"sh.600000", "sz.000001"}
+
+
+def test_metrics(api):
+    resp = api.get("/metrics")
+    assert resp.status_code == 200
+    text = resp.text
+    assert "stockdata_sync_running 0" in text
+    assert 'stockdata_watermark_codes{dataset="k_d"} 2' in text
+    assert "stockdata_halt" in text
 
 
 # ── 鉴权 ──

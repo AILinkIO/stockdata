@@ -48,6 +48,39 @@ def db_reset(
     typer.echo("新 schema 初始化完成")
 
 
+@app.command("check")
+def data_check(
+    codes: str = typer.Option("", "--codes", help="逗号分隔；缺省扫全部关注列表"),
+) -> None:
+    """数据缺口体检：日 K 水位区间内「是交易日但无行」的日期（停牌或真缺）。"""
+    from stockdata.db import queries
+
+    code_list = [c.strip() for c in codes.split(",") if c.strip()] or [
+        r["code"] for r in queries.watchlist_overview()
+    ]
+    if not code_list:
+        typer.echo("关注列表为空，也未指定 --codes")
+        raise typer.Exit(1)
+    bad = 0
+    for code in code_list:
+        r = queries.kline_gaps(code)
+        if r["last_date"] is None:
+            typer.echo(f"{code}: 日K 未同步过")
+            continue
+        n = len(r["missing"])
+        head = ", ".join(str(d) for d in r["missing"][:5])
+        more = f" …共 {n} 天" if n > 5 else ""
+        mark = "✓" if n == 0 else "⚠"
+        if n:
+            bad += 1
+        typer.echo(
+            f"{mark} {code}: {r['first_date']}~{r['last_date']} "
+            f"交易日 {r['trading_days']} · 缺口 {n}"
+            + (f"（{head}{more}）" if n else "")
+        )
+    typer.echo(f"\n{len(code_list)} 只体检完成，{bad} 只存在缺口（缺口=停牌或真缺，需人工判断）")
+
+
 @app.command("serve")
 def serve() -> None:
     """启动 NiceGUI 单服务（Web 页面 + HTTP API + 同步 worker 线程）。"""

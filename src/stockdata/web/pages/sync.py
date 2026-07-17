@@ -247,10 +247,20 @@ def sync_page() -> None:
             if st["started_at"]:
                 end = st["finished_at"] or time.time()
                 elapsed = f" · 用时 {int(end - st['started_at'])}s"
+            eta = ""
+            if (st["running"] and st["started_at"] and st["code_total"]
+                    and st["code_idx"] > 1):
+                per_code = (time.time() - st["started_at"]) / (st["code_idx"] - 1)
+                remain = per_code * (st["code_total"] - st["code_idx"] + 1)
+                eta = (f" · 预计剩余 {int(remain // 3600)}h{int(remain % 3600 // 60)}m"
+                       if remain >= 3600 else
+                       f" · 预计剩余 {int(remain // 60)}m{int(remain % 60)}s"
+                       if remain >= 60 else f" · 预计剩余 {int(remain)}s")
             stat_label.text = (
                 f"切片 {st['slices_done']} · 行 {st['rows_total']} · "
                 f"调用 {st['calls_total']}（{st['calls_per_minute']}/min，限 "
-                f"{settings.rate_limit_per_minute}）· 错误 {len(st['errors'])}{elapsed}"
+                f"{settings.rate_limit_per_minute}）· 错误 {len(st['errors'])}"
+                f"{elapsed}{eta}"
             )
             for note in st["notes"][seen["notes"]:]:
                 notes_log.push(note)

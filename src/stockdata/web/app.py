@@ -37,6 +37,42 @@ def healthz() -> dict:
     return {"status": "ok", "name": "stockdata"}
 
 
+@fastapi_app.get("/metrics")
+def metrics() -> "PlainTextResponse":
+    """Prometheus 抓取端点：同步状态、调用速率、熔断、各数据集水位年龄。"""
+    from datetime import date
+
+    from fastapi.responses import PlainTextResponse
+
+    lines: list[str] = []
+
+    def m(name: str, value, labels: str = "", mtype: str = "gauge") -> None:
+        if not any(line.startswith(f"# TYPE {name} ") for line in lines):
+            lines.append(f"# TYPE {name} {mtype}")
+        lines.append(f"{name}{labels} {value}")
+
+    st = state.runner.state() if state.runner is not None else None
+    m("stockdata_sync_running", int(st["running"]) if st else 0)
+    if st:
+        m("stockdata_sync_calls_per_minute", st["calls_per_minute"])
+        m("stockdata_sync_calls_total", st["calls_total"], mtype="counter")
+        m("stockdata_sync_run_errors", len(st["errors"]))
+    halt = _read_halt()
+    kind = (halt or {}).get("kind", "")
+    m("stockdata_halt", int(halt is not None), f'{{kind="{kind}"}}')
+    try:
+        summary = queries.watermark_summary()
+        for d in summary["datasets"]:
+            label = f'{{dataset="{d["dataset"]}"}}'
+            m("stockdata_watermark_codes", d["codes"], label)
+            if d["max_last"]:
+                age = (date.today() - date.fromisoformat(d["max_last"])).days
+                m("stockdata_watermark_age_days", age, label)
+    except Exception:
+        logger.exception("metrics 水位查询失败")
+    return PlainTextResponse("\n".join(lines) + "\n")
+
+
 @fastapi_app.get("/api/sync/status")
 def sync_status() -> dict:
     return {

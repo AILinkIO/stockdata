@@ -27,7 +27,7 @@ def remove_watch(code: str) -> None:
 
 
 def watchlist_overview() -> list[dict[str, Any]]:
-    """关注列表 + 各码名称与四种 K 线（日/周/5分/30分）水位新鲜度。"""
+    """关注列表 + 名称、四种 K 线水位、最新收盘/涨跌幅、近 30 日收盘序列。"""
     sql = """
         SELECT w.code,
                COALESCE(s.code_name, '') AS code_name,
@@ -35,13 +35,28 @@ def watchlist_overview() -> list[dict[str, Any]]:
                d.last_date   AS k_d_until,
                wk.last_date  AS k_w_until,
                m5.last_date  AS k_5_until,
-               m30.last_date AS k_30_until
+               m30.last_date AS k_30_until,
+               lk.close      AS last_close,
+               lk.pct_chg    AS last_pct_chg,
+               sp.closes     AS recent_closes
         FROM watchlist w
         LEFT JOIN security s ON s.code = w.code
         LEFT JOIN sync_watermark d   ON d.code   = w.code AND d.dataset   = 'k_d'
         LEFT JOIN sync_watermark wk  ON wk.code  = w.code AND wk.dataset  = 'k_w'
         LEFT JOIN sync_watermark m5  ON m5.code  = w.code AND m5.dataset  = 'k_5'
         LEFT JOIN sync_watermark m30 ON m30.code = w.code AND m30.dataset = 'k_30'
+        LEFT JOIN LATERAL (
+            SELECT close, pct_chg FROM kline
+            WHERE code = w.code AND frequency = 'd'
+            ORDER BY trade_date DESC LIMIT 1
+        ) lk ON true
+        LEFT JOIN LATERAL (
+            SELECT array_agg(close ORDER BY trade_date) AS closes FROM (
+                SELECT trade_date, close FROM kline
+                WHERE code = w.code AND frequency = 'd'
+                ORDER BY trade_date DESC LIMIT 30
+            ) t
+        ) sp ON true
         ORDER BY w.code
     """
     with get_pool().connection() as conn:
@@ -51,6 +66,9 @@ def watchlist_overview() -> list[dict[str, Any]]:
             "code": r[0], "code_name": r[1], "added_at": r[2],
             "k_d_until": r[3], "k_w_until": r[4],
             "k_5_until": r[5], "k_30_until": r[6],
+            "last_close": float(r[7]) if r[7] is not None else None,
+            "last_pct_chg": float(r[8]) if r[8] is not None else None,
+            "recent_closes": [float(c) for c in (r[9] or []) if c is not None],
         }
         for r in rows
     ]
@@ -179,6 +197,40 @@ def recent_runs(limit: int = 10) -> list[dict[str, Any]]:
         }
         for r in rows
     ]
+
+
+def health_snapshot() -> dict[str, Any]:
+    """全局状态横幅数据：熔断标志 + 关注列表日 K 最大滞后交易日数。"""
+    with get_pool().connection() as conn:
+        halt_row = conn.execute(
+            "SELECT value FROM sync_state WHERE key = 'halt'"
+        ).fetchone()
+        settled = conn.execute(
+            "SELECT max(calendar_date) FROM trade_calendar "
+            "WHERE is_trading_day AND calendar_date < CURRENT_DATE"
+        ).fetchone()[0]
+        lag_code, lag = None, None
+        if settled is not None:
+            r = conn.execute(
+                """
+                SELECT w.code,
+                       (SELECT count(*) FROM trade_calendar tc
+                        WHERE tc.is_trading_day
+                          AND tc.calendar_date > COALESCE(m.last_date, '1990-01-01')
+                          AND tc.calendar_date <= %s) AS lag
+                FROM watchlist w
+                LEFT JOIN sync_watermark m ON m.code = w.code AND m.dataset = 'k_d'
+                ORDER BY lag DESC LIMIT 1
+                """,
+                (settled,),
+            ).fetchone()
+            if r is not None:
+                lag_code, lag = r[0], r[1]
+    return {
+        "halt": halt_row[0] if halt_row else None,
+        "lag_code": lag_code,
+        "max_lag_days": lag,
+    }
 
 
 def market_watermarks() -> dict[str, dict[str, Any]]:
@@ -400,6 +452,42 @@ def watermark_rows(
         }
         for r in rows
     ]
+
+
+def kline_gaps(code: str) -> dict[str, Any]:
+    """日 K 缺口体检：水位覆盖区间内「是交易日但无 K 线行」的日期。
+
+    缺口 = 停牌日（合法缺行）或真实缺数，需结合停牌信息人工判断；
+    体检的价值在于缺口数量异常（如连续大段）时报警。
+    """
+    with get_pool().connection() as conn:
+        wm = conn.execute(
+            "SELECT first_date, last_date FROM sync_watermark "
+            "WHERE code = %s AND dataset = 'k_d'",
+            (code,),
+        ).fetchone()
+        if wm is None or wm[1] is None:
+            return {"code": code, "first_date": None, "last_date": None,
+                    "trading_days": 0, "missing": []}
+        trading_days = conn.execute(
+            "SELECT count(*) FROM trade_calendar "
+            "WHERE is_trading_day AND calendar_date BETWEEN %s AND %s",
+            (wm[0], wm[1]),
+        ).fetchone()[0]
+        rows = conn.execute(
+            """
+            SELECT calendar_date FROM trade_calendar
+            WHERE is_trading_day AND calendar_date BETWEEN %s AND %s
+            EXCEPT
+            SELECT trade_date FROM kline WHERE code = %s AND frequency = 'd'
+            ORDER BY 1
+            """,
+            (wm[0], wm[1], code),
+        ).fetchall()
+    return {
+        "code": code, "first_date": wm[0], "last_date": wm[1],
+        "trading_days": trading_days, "missing": [r[0] for r in rows],
+    }
 
 
 def financial_rows(

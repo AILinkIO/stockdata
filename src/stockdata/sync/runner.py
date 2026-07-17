@@ -10,12 +10,16 @@ import logging
 import threading
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from stockdata.config import Settings
-from stockdata.provider.interface import Provider
+from stockdata.provider.interface import BlacklistError, Provider
 
-from .engine import AnotherRunActive, EngineEvents, RunParams, SyncEngine
+from .engine import (
+    AnotherRunActive, EngineEvents, RunParams, SyncEngine,
+    clear_halt, read_halt, save_halt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -145,9 +149,11 @@ class SyncRunner:
 
     def _loop(self) -> None:
         while not self._shutdown.is_set():
-            # 空闲等待启动请求；顺带做空闲登出检查
+            # 空闲等待启动请求；顺带做空闲登出与熔断探测检查
             if not self._wakeup.wait(timeout=5):
                 self._maybe_idle_logout()
+                self._maybe_probe_halt()
+                self._maybe_log_lag()
                 continue
             self._wakeup.clear()
             with self._lock:
@@ -193,6 +199,112 @@ class SyncRunner:
             self._state.status = status
             self._state.run_id = engine.run_id
             self._state.finished_at = time.time()
+
+    # ── 熔断自动探测（仅 login_error；拉黑绝不自动探测）──
+
+    def _maybe_probe_halt(self) -> None:
+        hours = getattr(self._settings, "halt_probe_interval_hours", 0)
+        if hours <= 0:
+            return
+        now = time.monotonic()
+        if now < getattr(self, "_next_halt_check", 0):
+            return
+        self._next_halt_check = now + 60  # DB 检查本身限频 1 次/分钟
+        try:
+            self._probe_halt(hours)
+        except Exception:
+            logger.exception("熔断探测异常")
+
+    def _probe_halt(self, hours: float) -> None:
+        import psycopg
+
+        with psycopg.connect(self._conninfo) as conn:
+            halt = read_halt(conn)
+        if not halt or halt.get("kind") != "login_error":
+            return
+        interval = hours * 3600
+        ref = halt.get("last_probe_at") or halt.get("halted_at")
+        if ref:
+            try:
+                elapsed = (
+                    datetime.now(timezone.utc) - datetime.fromisoformat(ref)
+                ).total_seconds()
+            except ValueError:
+                elapsed = interval
+            if elapsed < interval:
+                return
+        # 先盖章再探测：失败也计入本轮，防止探测风暴
+        halt["last_probe_at"] = datetime.now(timezone.utc).isoformat()
+        with psycopg.connect(self._conninfo) as conn:
+            save_halt(conn, halt)
+        logger.info("登录异常熔断已满 %.1f 小时，探测一次登录…", hours)
+        try:
+            self._provider.force_relogin()
+        except BlacklistError as e:
+            if getattr(e, "kind", "blacklist") == "blacklist":
+                halt.update({"reason": str(e), "kind": "blacklist"})
+                with psycopg.connect(self._conninfo) as conn:
+                    save_halt(conn, halt)
+                logger.error("探测发现 IP 已被拉黑，转为人工处理：%s", e)
+            else:
+                logger.warning("熔断探测仍失败，下个周期再试：%s", e)
+            return
+        except Exception as e:
+            logger.warning("熔断探测登录失败，下个周期再试：%s", e)
+            return
+        if getattr(self._provider, "reset_circuit", None):
+            self._provider.reset_circuit()
+        clear_halt(self._conninfo)
+        logger.info("熔断探测登录成功，已自动清除熔断")
+        with psycopg.connect(self._conninfo) as conn:
+            row = conn.execute(
+                "SELECT params, status FROM sync_run ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        if row and row[1] == "halted":
+            p = row[0]
+            ok, msg = self.start(RunParams(
+                codes=p.get("codes", []),
+                datasets=p.get("datasets", []),
+                watchlist_only=p.get("watchlist_only", False),
+            ))
+            logger.info("自动续跑被熔断中断的任务：%s", msg)
+
+    def _maybe_log_lag(self) -> None:
+        """每小时体检一次关注列表日K水位滞后，>2 个交易日则 log 告警（哑火探测）。"""
+        now = time.monotonic()
+        if now < getattr(self, "_next_lag_check", 0):
+            return
+        self._next_lag_check = now + 3600
+        try:
+            import psycopg
+
+            with psycopg.connect(self._conninfo) as conn:
+                settled = conn.execute(
+                    "SELECT max(calendar_date) FROM trade_calendar "
+                    "WHERE is_trading_day AND calendar_date < CURRENT_DATE"
+                ).fetchone()[0]
+                if settled is None:
+                    return
+                row = conn.execute(
+                    """
+                    SELECT w.code,
+                           (SELECT count(*) FROM trade_calendar tc
+                            WHERE tc.is_trading_day
+                              AND tc.calendar_date > COALESCE(m.last_date, '1990-01-01')
+                              AND tc.calendar_date <= %s) AS lag
+                    FROM watchlist w
+                    LEFT JOIN sync_watermark m ON m.code = w.code AND m.dataset = 'k_d'
+                    ORDER BY lag DESC LIMIT 1
+                    """,
+                    (settled,),
+                ).fetchone()
+            if row is not None and row[1] > 2:
+                logger.warning(
+                    "数据滞后告警：%s 的日K已落后 %d 个交易日（同步管道可能哑火）",
+                    row[0], row[1],
+                )
+        except Exception:
+            logger.exception("滞后体检失败")
 
     def _maybe_idle_logout(self) -> None:
         try:

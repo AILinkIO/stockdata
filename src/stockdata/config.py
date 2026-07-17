@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     # ── 崩溃恢复：启动时把遗留 running 任务收尾成 interrupted 并自动续跑 ──
     resume_interrupted_on_start: bool = True
 
+    # ── 熔断自动探测：仅 kind=login_error（网络/登录异常升级）每隔 N 小时探测一次
+    #    登录，成功自动 clear-halt 并续跑；拉黑（blacklist）绝不自动探测。<=0 关闭 ──
+    halt_probe_interval_hours: float = 4.0
+
     # ── baostock ──
     baostock_socket_timeout: int = 30  # TCP 超时：挂死靠它快速失败重连
 
@@ -49,6 +53,8 @@ class Settings(BaseSettings):
     minute_backfill_floor: date = date(2023, 1, 1)     # 分钟线最早回填日
     financial_backfill_floor: date = date(2020, 1, 1)  # 财报默认回填下限（全历史成本过高）
     kline_slice_days: int = 3650   # 日/周线切片跨度（自然日）
+    tail_refresh_days: int = 5     # 日/周线尾部修正窗口：每次增量重拉最近 N 自然日
+                                   # 覆盖盘后修正（turn/pe 等），upsert 幂等、不增加调用数
     minute_slice_days: int = 180   # 分钟线切片跨度（自然日，5 分线 ≈6k 行/片）
     stale_after_hours: int = 20    # 未结算数据集（分红/财报/快报等）的重查间隔
     snapshot_refresh_days: int = 7  # 快照类（行业/指数成分/复权因子兜底）的重抓间隔

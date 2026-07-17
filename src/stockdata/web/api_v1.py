@@ -237,6 +237,17 @@ def macro(kind: MacroKind, start: str | None = None, end: str | None = None) -> 
     return _env(rows, kind=kind, count=len(rows))
 
 
+@router.get("/meta/gaps", tags=["元数据"])
+def kline_gaps(code: str, limit: int = Query(500, ge=1, le=10000)) -> dict:
+    """日 K 缺口体检：水位区间内「是交易日但无行」的日期（停牌或真缺，需人工判断）。"""
+    r = queries.kline_gaps(code)
+    missing = r["missing"]
+    return _env(missing[:limit], code=code,
+                first_date=r["first_date"], last_date=r["last_date"],
+                trading_days=r["trading_days"], missing_count=len(missing),
+                truncated=len(missing) > limit)
+
+
 @router.get("/meta/watermarks", tags=["元数据"])
 def watermarks(
     code: str | None = None,

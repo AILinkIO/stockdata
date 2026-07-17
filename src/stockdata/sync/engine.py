@@ -13,7 +13,7 @@ import json
 import logging
 import threading
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Sequence
 
 import psycopg
@@ -31,7 +31,11 @@ ADVISORY_LOCK_KEY = "stockdata_sync"
 
 
 class HaltError(Exception):
-    """拉黑熔断：run 终止并持久化 halt 标志。"""
+    """熔断：run 终止并持久化 halt 标志。kind 同 BlacklistError.kind。"""
+
+    def __init__(self, msg: str, kind: str = "blacklist") -> None:
+        super().__init__(msg)
+        self.kind = kind
 
 
 class StopRequested(Exception):
@@ -101,6 +105,16 @@ def clear_halt(conninfo: str) -> bool:
     with psycopg.connect(conninfo) as conn:
         cur = conn.execute("DELETE FROM sync_state WHERE key = 'halt'")
         return cur.rowcount > 0
+
+
+def save_halt(conn: psycopg.Connection, value: dict) -> None:
+    conn.execute(
+        """
+        INSERT INTO sync_state (key, value) VALUES ('halt', %s)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+        """,
+        (json.dumps(value),),
+    )
 
 
 def recover_interrupted_run(conninfo: str) -> dict | None:
@@ -182,7 +196,7 @@ class SyncEngine:
                 self._events.note("已按请求停止")
             except HaltError as e:
                 stats.status = "halted"
-                self._persist_halt(conn, str(e))
+                self._persist_halt(conn, str(e), e.kind)
                 self._events.note(f"熔断停机: {e}")
             except AnotherRunActive:
                 raise
@@ -229,7 +243,7 @@ class SyncEngine:
 
         if code_handlers:
             self._events.phase("按码同步（日频）")
-            for idx, (code, ipo) in enumerate(codes):
+            for idx, (code, ipo, _type) in enumerate(codes):
                 self._check_stop()
                 self._events.code_start(code, idx + 1, len(codes))
                 for handler in code_handlers:
@@ -239,10 +253,12 @@ class SyncEngine:
                 self._flush_stats(conn, stats)
 
         if minute_handlers:
+            # baostock 分钟线不含指数（type=2），跳过省调用
+            minute_codes = [c for c in codes if c[2] != 2]
             self._events.phase("按码同步（分钟线）")
-            for idx, (code, ipo) in enumerate(codes):
+            for idx, (code, ipo, _type) in enumerate(minute_codes):
                 self._check_stop()
-                self._events.code_start(code, idx + 1, len(codes))
+                self._events.code_start(code, idx + 1, len(minute_codes))
                 for handler in minute_handlers:
                     self._check_stop()
                     self._run_dataset(conn, handler, code, ipo, stats, today)
@@ -250,25 +266,26 @@ class SyncEngine:
 
     def _resolve_codes(
         self, conn: psycopg.Connection, params: RunParams
-    ) -> list[tuple[str, date | None]]:
+    ) -> list[tuple[str, date | None, int | None]]:
+        """返回 (code, ipo_date, type)；type=2 指数只同步日/周线（无分钟线）。"""
         if params.codes:
             rows = conn.execute(
-                "SELECT code, ipo_date FROM security WHERE code = ANY(%s)",
+                "SELECT code, ipo_date, type FROM security WHERE code = ANY(%s)",
                 (params.codes,),
             ).fetchall()
-            known = {r[0]: r[1] for r in rows}
-            return [(c, known.get(c)) for c in params.codes]
+            known = {r[0]: (r[1], r[2]) for r in rows}
+            return [(c, *known.get(c, (None, None))) for c in params.codes]
         if params.watchlist_only:
             rows = conn.execute(
-                "SELECT w.code, s.ipo_date FROM watchlist w "
+                "SELECT w.code, s.ipo_date, s.type FROM watchlist w "
                 "LEFT JOIN security s ON s.code = w.code ORDER BY w.code"
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT code, ipo_date FROM security "
+                "SELECT code, ipo_date, type FROM security "
                 "WHERE type = 1 AND status = 1 ORDER BY code"
             ).fetchall()
-        return [(r[0], r[1]) for r in rows]
+        return [(r[0], r[1], r[2]) for r in rows]
 
     # ── 数据集/切片执行 ──
 
@@ -330,7 +347,7 @@ class SyncEngine:
                 ctx.wm = watermark.get(conn, ctx.code, dataset)
                 return
             except BlacklistError as e:
-                raise HaltError(str(e)) from e
+                raise HaltError(str(e), kind=getattr(e, "kind", "blacklist")) from e
             except DataSourceError as e:
                 attempt += 1
                 if attempt > self._settings.max_retries:
@@ -352,14 +369,12 @@ class SyncEngine:
         if self._stop.is_set():
             raise StopRequested()
 
-    def _persist_halt(self, conn: psycopg.Connection, reason: str) -> None:
-        conn.execute(
-            """
-            INSERT INTO sync_state (key, value) VALUES ('halt', %s)
-            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
-            """,
-            (json.dumps({"reason": reason}),),
-        )
+    def _persist_halt(self, conn: psycopg.Connection, reason: str, kind: str) -> None:
+        save_halt(conn, {
+            "reason": reason,
+            "kind": kind,
+            "halted_at": datetime.now(timezone.utc).isoformat(),
+        })
 
     def _flush_stats(self, conn: psycopg.Connection, stats: RunStats) -> None:
         conn.execute(
@@ -373,6 +388,6 @@ def resolve_code_list(conninfo: str, params: RunParams) -> Sequence[str]:
     engine_conn = psycopg.connect(conninfo)
     try:
         dummy = SyncEngine.__new__(SyncEngine)
-        return [c for c, _ in dummy._resolve_codes(engine_conn, params)]
+        return [c for c, *_ in dummy._resolve_codes(engine_conn, params)]
     finally:
         engine_conn.close()

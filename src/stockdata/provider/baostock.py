@@ -238,6 +238,13 @@ class BaostockProvider:
             self._logged_in = False
             logger.warning("空闲登出被 watchdog 中断，已弃用连接")
 
+    def reset_circuit(self) -> None:
+        """熔断探测登录成功后调用：给恢复的会话重新一个完整的失败阈值窗口。
+
+        普通 relogin 重试路径不重置——阈值升级语义靠它保证。
+        """
+        self._consecutive_recv_errors = 0
+
     # ── 内部状态 ──
 
     def _stamp_activity(self) -> None:
@@ -250,7 +257,8 @@ class BaostockProvider:
         if self._consecutive_recv_errors >= threshold:
             return BlacklistError(
                 f"{msg}（连续 {self._consecutive_recv_errors} 次网络接收错误，"
-                f"relogin 无法恢复，熔断暂停待 clear-halt）"
+                f"relogin 无法恢复，熔断暂停待自动探测或 clear-halt）",
+                kind="login_error",
             )
         logger.warning(
             "网络接收错误(10002007) 第 %d 次，将重登录重试: %s",

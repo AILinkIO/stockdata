@@ -98,6 +98,18 @@ uv run stockdata db init          # 初始化 schema（幂等）
 - **崩溃恢复**：启动时把上一进程遗留的 `running` 孤儿 run 收尾成 `interrupted`；
   最新一条是 `interrupted`（崩溃或关停打断，非用户主动 stop/熔断 halted）则以原参数
   自动续跑，水位保证从断点继续。开关 `STOCKDATA_RESUME_INTERRUPTED_ON_START`（默认开）。
+- **熔断分类与自动探测**：halt 分 `blacklist`（10001011 拉黑，只能人工 clear-halt）
+  与 `login_error`（连续网络接收/登录异常升级）两类；后者由 worker 每
+  `STOCKDATA_HALT_PROBE_INTERVAL_HOURS`（默认 4）小时探测一次登录，成功自动
+  清除熔断并续跑被打断的任务；探测发现拉黑则升级为 blacklist 停止探测。
+- **尾部修正**：日/周线每次增量把起点拉回最近 `STOCKDATA_TAIL_REFRESH_DAYS`
+  （默认 5）个自然日，覆盖盘后修正（turn/pe 等衍生列）；单片单调用、不增加调用数。
+- **指数**：关注列表可加指数码（如 sh.000001）——日/周线正常同步，
+  分钟线阶段自动跳过（baostock 不支持指数分钟线）。
+- **体检**：`uv run stockdata check`（或 `GET /api/v1/meta/gaps?code=…`）对照交易日历
+  找日 K 缺口（缺口=停牌或真缺，需人工判断）；Web 所有页面顶部有全局横幅
+  （熔断=红条 / 关注列表日K滞后 >2 交易日=黄条），worker 每小时也 log 滞后告警；
+  Prometheus 指标见 `GET /metrics`。
 - K 线只存**不复权**原始值；前/后复权在读时由 back 因子推导（`后=raw×B(t)`，
   `前=raw×B(t)/B(latest)`），存量因子永不过期。
 

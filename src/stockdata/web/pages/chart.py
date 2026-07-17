@@ -40,7 +40,20 @@ def chart_page(code: str) -> None:
     name = queries.security_name(code)
 
     with ui.column().classes("w-full max-w-6xl mx-auto p-4 gap-2"):
-        ui.label(f"{code} {name}").classes("text-2xl font-bold")
+        with ui.row().classes("items-center gap-4"):
+            ui.label(f"{code} {name}").classes("text-2xl font-bold")
+            options = {
+                r["code"]: f"{r['code']} {r['code_name'] or ''}".strip()
+                for r in queries.watchlist_overview()
+            }
+            options.setdefault(code, f"{code} {name}".strip())
+            switcher = ui.select(
+                options, value=code, with_input=True, label="切换股票"
+            ).classes("w-56").props("dense outlined")
+            switcher.on_value_change(
+                lambda e: e.value and e.value != code
+                and ui.navigate.to(f"/chart/{e.value}")
+            )
 
         with ui.tabs().props("align=left") as tabs:
             tab_k = ui.tab("K线")

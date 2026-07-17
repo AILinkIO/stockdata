@@ -33,6 +33,7 @@ def make_settings(**overrides) -> Settings:
         retry_max_backoff_seconds=0,
         minute_backfill_floor=date(2026, 6, 1),
         financial_backfill_floor=date(2026, 1, 1),
+        tail_refresh_days=0,  # 大多数用例要"零调用增量"语义；尾部修正单独测
     )
     defaults.update(overrides)
     return Settings(**defaults)
@@ -101,6 +102,47 @@ def test_second_run_is_fully_incremental(pg_db):
     assert stats.status == "done"
     # 全部数据集已覆盖/fresh：零 baostock 调用
     assert fake.calls == []
+
+
+def test_tail_refresh_repulls_recent_window(pg_db):
+    """尾部修正：已覆盖时日/周线仍重拉最近 N 天（单片单调用），分钟线不受影响。"""
+    from datetime import timedelta
+
+    fake = FakeProvider()
+    settings = make_settings(tail_refresh_days=5)
+    make_engine(pg_db, fake, settings).run(RunParams(codes=["sh.600000"]), today=TODAY)
+
+    fake.calls.clear()
+    stats = make_engine(pg_db, fake, settings).run(
+        RunParams(codes=["sh.600000"]), today=TODAY
+    )
+    assert stats.status == "done" and not stats.errors
+
+    d_calls = fake.calls_of("query_k_data", frequency="d")
+    assert len(d_calls) == 1
+    assert d_calls[0]["start_date"] == (SETTLED - timedelta(days=4)).isoformat()
+    assert d_calls[0]["end_date"] == SETTLED.isoformat()
+    assert len(fake.calls_of("query_k_data", frequency="w")) == 1
+    assert fake.calls_of("query_k_data", frequency="5") == []  # 分钟线零调用
+
+
+def test_index_code_syncs_daily_but_skips_minute(pg_db):
+    """指数（type=2）：日/周线正常同步，分钟线阶段跳过（baostock 不支持指数分钟线）。"""
+    fake = FakeProvider(codes=("sh.600000", "sh.000001"), index_codes=("sh.000001",))
+    make_engine(pg_db, fake).run(RunParams(), today=TODAY)  # 全量建 security（含 type）
+
+    fake.calls.clear()
+    with psycopg.connect(pg_db) as conn:
+        conn.execute("DELETE FROM sync_watermark WHERE dataset IN ('k_5', 'k_30')")
+    stats = make_engine(pg_db, fake).run(
+        RunParams(codes=["sh.600000", "sh.000001"]), today=TODAY
+    )
+    assert stats.status == "done"
+    minute_codes = {c["code"] for c in fake.calls_of("query_k_data", frequency="5")}
+    assert minute_codes == {"sh.600000"}  # 指数被跳过
+    # 指数日线已入库
+    assert q1(pg_db, "SELECT count(*) FROM kline WHERE code='sh.000001' "
+                     "AND frequency='d'")[0] > 0
 
 
 def test_resume_after_dataset_failure(pg_db):

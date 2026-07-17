@@ -27,7 +27,16 @@ class NoDataFoundError(DataSourceError):
 
 
 class BlacklistError(DataSourceError):
-    """出口 IP 被拉黑或持续接收错误：致命，引擎持久 halt 待人工 clear-halt。"""
+    """致命熔断，引擎持久 halt。kind 决定恢复方式：
+
+    - "blacklist"：IP 被拉黑（10001011）——只能人工 clear-halt，绝不自动探测；
+    - "login_error"：连续网络接收/登录异常升级——runner 每隔
+      halt_probe_interval_hours 自动探测一次登录，成功自动解除并续跑。
+    """
+
+    def __init__(self, msg: str, kind: str = "blacklist") -> None:
+        super().__init__(msg)
+        self.kind = kind
 
 
 class Provider(Protocol):
