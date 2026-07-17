@@ -60,43 +60,32 @@ def sync_page() -> None:
             "w-full p-2 rounded bg-red-100 text-red-800 font-bold hidden"
         )
 
-        # ── 控制区 ──
-        with ui.row().classes("items-center gap-2"):
+        def _start(params: RunParams, what: str) -> None:
+            if _halt():
+                ui.notify("处于熔断状态，先清除熔断", type="warning")
+                return
+            ok, msg = state.get_runner().start(params)
+            ui.notify(f"已启动{what}" if ok else f"未启动：{msg}",
+                      type="positive" if ok else "warning")
 
-            def start_watchlist() -> None:
-                _start(RunParams(watchlist_only=True), "关注列表同步")
+        def stop_run() -> None:
+            if state.get_runner().stop():
+                ui.notify("已请求停止（完成当前切片后退出）")
+            else:
+                ui.notify("当前没有在运行的任务", type="info")
 
-            def start_market() -> None:
-                _start(RunParams(datasets=list(_MARKET_DATASETS)), "全市场指标同步")
+        def do_clear_halt() -> None:
+            cleared = clear_halt(settings.pg_conninfo)
+            ui.notify("熔断已清除" if cleared else "当前没有熔断标志")
 
-            def _start(params: RunParams, what: str) -> None:
-                if _halt():
-                    ui.notify("处于熔断状态，先清除熔断", type="warning")
-                    return
-                ok, msg = state.get_runner().start(params)
-                ui.notify(f"已启动{what}" if ok else f"未启动：{msg}",
-                          type="positive" if ok else "warning")
-
-            def stop_run() -> None:
-                if state.get_runner().stop():
-                    ui.notify("已请求停止（完成当前切片后退出）")
-                else:
-                    ui.notify("当前没有在运行的任务", type="info")
-
-            def do_clear_halt() -> None:
-                cleared = clear_halt(settings.pg_conninfo)
-                ui.notify("熔断已清除" if cleared else "当前没有熔断标志")
-
-            ui.button("启动同步", on_click=start_watchlist).props("color=primary") \
-                .tooltip("同步首页已添加的全部股票")
-            ui.button("同步全市场指标", on_click=start_market).props(
-                "color=primary outline"
-            ).tooltip("单独执行下方市场级任务")
-            ui.button("停止", on_click=stop_run).props("color=warning outline")
-            ui.button("清除熔断", on_click=do_clear_halt).props("color=negative outline")
-
-        # ── 当前进度 ──
-        ui.label("当前进度").classes("text-lg font-bold mt-2")
+        # ── 当前进度（停止/清除熔断在此，对两种同步通用）──
+        with ui.row().classes("w-full items-center"):
+            ui.label("当前进度").classes("text-lg font-bold")
+            ui.space()
+            ui.button("停止", on_click=stop_run).props("color=warning outline dense")
+            ui.button("清除熔断", on_click=do_clear_halt).props(
+                "color=negative outline dense"
+            )
         phase_label = ui.label("").classes("text-lg font-bold")
         progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
         detail_label = ui.label("").classes("text-sm")
@@ -107,11 +96,34 @@ def sync_page() -> None:
         with errors_expand:
             errors_log = ui.log(max_lines=50).classes("w-full h-48")
 
-        # ── 市场级任务（默认全市场指标，单独列出）──
-        ui.label("市场级任务").classes("text-lg font-bold mt-2")
+        ui.separator().classes("mt-2")
+
+        # ── 功能一：关注列表同步 ──
+        def start_watchlist() -> None:
+            _start(RunParams(watchlist_only=True), "关注列表同步")
+
+        with ui.row().classes("w-full items-center"):
+            ui.label("关注列表同步").classes("text-lg font-bold")
+            ui.space()
+            ui.button("同步关注列表", on_click=start_watchlist).props("color=primary")
         ui.label(
-            "全市场指标的默认同步任务，单独列出；「同步全市场指标」会全部执行，"
-            "「启动同步」只自动带上交易日历与证券信息。"
+            "同步首页已添加股票的全部数据集（K线、复权因子、分红、财务等），"
+            "并自动带上按码规划所需的交易日历与证券信息。"
+        ).classes("text-sm text-gray-500")
+
+        ui.separator().classes("mt-2")
+
+        # ── 功能二：市场信息同步 ──
+        def start_market() -> None:
+            _start(RunParams(datasets=list(_MARKET_DATASETS)), "市场信息同步")
+
+        with ui.row().classes("w-full items-center"):
+            ui.label("市场信息同步").classes("text-lg font-bold")
+            ui.space()
+            ui.button("同步市场信息", on_click=start_market).props("color=primary")
+        ui.label(
+            "全市场级别的默认任务：交易日历、证券信息、行业分类、指数成分、宏观数据等，"
+            "与个股无关，单独执行。"
         ).classes("text-sm text-gray-500")
         market_table = ui.table(
             columns=[
@@ -126,6 +138,8 @@ def sync_page() -> None:
             rows=[],
             row_key="dataset",
         ).classes("w-full")
+
+        ui.separator().classes("mt-2")
 
         # ── 运行历史（点击行看任务详情）──
         ui.label("同步历史").classes("text-lg font-bold mt-2")
@@ -299,7 +313,7 @@ def _run_kind(params: dict) -> str:
         what = "全市场"
     if datasets:
         if set(datasets) == set(_MARKET_DATASETS):
-            return "全市场指标"
+            return "市场信息"
         ds = "、".join(_label(d) for d in datasets[:3]) + (
             "…" if len(datasets) > 3 else ""
         )
