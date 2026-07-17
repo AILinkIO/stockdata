@@ -1,0 +1,14 @@
+.git
+.venv
+.env
+.env.*
+!.env.example
+__pycache__
+*.pyc
+tests/
+docs/
+server/
+dotnet-mcp/
+scripts/
+*.md
+!README.md

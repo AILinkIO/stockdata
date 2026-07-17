@@ -1,92 +1,99 @@
 # stockdata
 
-A 股市场数据服务。架构：**dotnet 为唯一数据属主**（PostgreSQL + 全部 MCP 工具 serving），
-**Python 为无状态 baostock 抓取微服务**。
+A 股数据同步与展示：纯 Python 单服务。
+
+- **一个常驻进程**（NiceGUI）承载全部功能：
+  - Web 页面：`/` 关注列表管理、`/chart/{code}` K 线图、`/sync` 同步仪表盘；
+  - REST API：`/api/sync/*`（启动/停止/状态/清熔断）；
+  - **唯一的 baostock 同步 worker 线程**（严格单进程 + 单线程，绝不并发）。
+- **CLI 是薄客户端**：`stockdata sync run --tui/--plain` 通过 HTTP 启动任务并跟踪进度，
+  与 Web `/sync` 页看的是同一份进度状态。
+- 数据落 PostgreSQL（物理机服务）；Redis 已不再需要。
 
 ## 架构
 
 ```
-MCP 客户端 ──MCP 协议──> mcp (dotnet, :8000) ──┬── 直读 / 落盘 ──> PostgreSQL
-                                              └── HTTP ──> fetch (Python, :8090) ──> baostock
+                 ┌──────────────────────── app 容器（唯一进程）───────────────────────┐
+ 浏览器 ────────▶│ NiceGUI 页面（/、/chart/{code}、/sync）   ← 纯 PG 读，永不碰 baostock │
+ CLI(rich TUI) ─▶│ REST /api/sync/run|status|stop|clear-halt                          │
+ cron(curl) ────▶│      └─▶ SyncRunner（唯一 worker 线程）─▶ SyncEngine                │
+                 │            逐码逐数据集切片：fetch → upsert → 推水位（同一事务）       │
+                 │            └─▶ BaostockProvider（限流 90/min·登录守卫·watchdog）     │
+                 └──────────────────────────────┬────────────────────────────────────┘
+                                                ▼
+                                    PostgreSQL（127.0.0.1:5432/stockdata）
 ```
 
-- **mcp（[dotnet-mcp/](dotnet-mcp/)）** — C# .NET 10，唯一 PG 属主。读纯走 PG（懒登记 + 定向高优先
-  有界抓取）、后台常驻 `SyncDrainer` 全量续传、落盘、以及全部工具 serving（行情/复权/财报/宏观/快照/
-  交易日历/日期派生/TA-Lib 指标）。EF Core 管 schema。:8000 Streamable HTTP（MCP 协议）。
-- **fetch（[server/](server/)）** — 无状态 baostock 抓取微服务（FastAPI）。只做「给定参数 → 调 baostock →
-  返回数据」，**不碰 PG**。submit+poll + high/low 优先队列 + 限流 + 退避重试 + 长驻 baostock 会话。:8090。
-- **PostgreSQL / Redis(Valkey)** — 物理机服务。PG 由 dotnet 独占；Redis 供 fetch 的 job 存储与限流。
+### baostock 红线（全部由代码强制，人不用记）
 
-## 数据流（方案 A：唯一串行驱动 baostock 的常驻 Drainer）
+| 红线 | 机制 |
+|---|---|
+| 限流 90 次/分钟 | 进程内滑动窗口限流器，每次查询前阻塞配速 |
+| 单进程单线程 | 唯一 worker 线程 + 模块级锁 + PG advisory lock（防多实例） |
+| **两次 `bs.login()` 间隔 ≥5 分钟** | 登录时间戳持久化在 PG `baostock_session`，跨进程重启生效；不足自动 sleep 补齐 |
+| IP 拉黑（10001011） | 立即熔断：写持久 halt 标志、终止 run，后续 run 拒绝启动直到人工 `clear-halt` |
+| 网络接收错误（10002007） | relogin 自愈；连续 5 次才升级熔断 |
+| 库内 recv 死循环 | watchdog 硬超时（600s）注入异常中断，弃用连接 |
+| 僵死长连接 | 空闲 ≥15 分钟自动登出，下次查询重新登录 |
 
-baostock 按 IP 限频，过频拉黑，因此**全局只有一条串行抓取通道**：dotnet 的 `SyncDrainer`
-后台 worker 串行下达 job，fetch 侧单 worker 串行消费。读与后台同步靠 **high/low 优先级**错开。
+启动/重启进程本身**不**触发登录（惰性登录，首个同步任务才 login）。
 
-**读路径（`ServeFromPgOnly=true`）** — MCP 工具读到一个 code：
-
-1. **懒登记** — 把未纳管的 code 写入 `synced_stock` 并建一条 pending 的 `stock_sync_task`（不触 baostock）。
-2. **定向高优先有界抓取** — 用 `high` 优先在 fetch 队列插队，按 `ReadFetchBudgetSeconds`（默认 30s）有界等待：
-   预算内抓到 → 返回新鲜数据；超预算/失败 → **吞掉异常，回退读 PG 现状**（不挂死、不报错）。
-3. 缺口由后台 Drainer 续补。
-
-**后台同步（low 优先）** — 常驻 `SyncDrainer`：
-
-- 从 `stock_sync_task` 取 due（pending/partial）任务，逐票 `low` 优先全量同步
-  （stock_basic→k_d→adjust→dividend→financial→performance），每步幂等 + 落 `datasets_done` 步级断点 → 续传。
-- 按 `MarketRefreshSeconds`（默认 1h）自维护市场级数据（交易日历→证券列表→行业→指数成分）。
-- baostock 拉黑（halt）时暂停提交，由 `FetchHaltMonitor` 冷却后自动 `/restart` 恢复。
-
-**控制面（cron 调，秒回、不抓 baostock）**：
-
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| `POST` | `/sync/refresh` | 把完成早于 `StaleAfterHours`（默认 20h）的 done 任务重置 pending，交 Drainer 后台消费 |
-| `GET`  | `/sync/status`  | 同步进度观测（已纳管票数 + 按状态计数） |
-
-> 管线关闭（`PipelineEnabled=false`）时 `/sync/*` 返回 503。
-
-## fetch 微服务
-
-异步 submit + poll 的抓取代理（Python 不持有数据库）：
-
-1. dotnet `POST /fetch {type, params, priority}` → 立即返回 `202 {job_id}`（**不阻塞**）。
-2. fetch **单 worker 串行**消费：先 `high` 后 `low`，限流闸（每分钟 N 次）→ 调 baostock → 结果写 Redis（带 TTL）。
-3. dotnet 轮询 `GET /fetch/{job_id}` 至 `done`，取回原始 payload，**自己解析并落盘到 PG**。
-
-要点：
-
-- **不碰 PG** — 抓到的数据经 Redis 回传给 dotnet，落盘由 dotnet 负责。
-- **去重搭车** — 同参数（params_hash）的并发请求复用同一 job，只抓一次。
-- **限流防拉黑** — 每分钟查询数上限（Redis 滑动窗口）+ 串行消费，保护 baostock IP。
-- **halt/restart** — 拉黑（10001011/10002007）时 worker 写持久标志停摆；`GET /status` 感知、`POST /restart` 恢复（进程不退）。
-- **长驻会话** — baostock 惰性登录、长连接复用；⚠️ **进程勿频繁重启**（每次重启 = 一次新登录，
-  间隔须 > 5 分钟，否则可能被判异常登录频次而拉黑）。
-
-抓取类型与 job/Redis 细节见 [server/README.md](server/README.md)。
-
-## 部署
-
-物理机需 PostgreSQL + Valkey(Redis)。容器走 host 网络直连本机服务。
+## 部署与日常操作
 
 ```bash
-./up.sh            # 构建并拉起 fetch + mcp（= sudo docker compose up -d --build）
-./up.sh mcp        # 只拉起单个服务
-./down.sh          # 停止（保留数据卷；./down.sh -v 连数据卷一起清）
-sudo docker compose ps
+cp .env.example .env    # 填 STOCKDATA_PG_DSN
+uv run stockdata db init          # 初始化 schema（幂等）
+./up.sh                           # 构建并拉起 app 容器（host 网络，:8050）
 ```
 
-配置见 [server/.env](server/.env.example)：fetch 与 mcp **共用同一份 `.env`**——mcp 用
-`STOCKDATA_PG_DSN` 连 PG，fetch 用限流/重试/Redis 各项。新抓取模型的开关在 compose 的 mcp 环境段
-（`PipelineEnabled` / `ServeFromPgOnly` / `FetchBase`）。
+- Web: <http://127.0.0.1:8050>
+- 同步（三选一，效果相同）：
+  - Web `/sync` 页点「启动同步」；
+  - `uv run stockdata sync run --tui`（终端 rich 仪表；`--plain` 输出日志行）；
+  - cron：`uv run stockdata sync run --plain` 或
+    `curl -X POST http://127.0.0.1:8050/api/sync/run -H 'content-type: application/json' -d '{}'`。
+- 其他命令：
+  ```bash
+  uv run stockdata sync status       # 服务状态 + 全库水位概览 + 运行历史
+  uv run stockdata sync stop         # 完成当前切片后干净停止
+  uv run stockdata sync clear-halt   # 确认解封后清除熔断
+  uv run stockdata sync run --codes sh.600000,sz.000001   # 指定代码
+  uv run stockdata sync run --watchlist-only --datasets k_d,k_5
+  uv run stockdata db reset --yes    # ⚠️ 删全部表重建（数据重新同步）
+  ```
 
-## 项目结构
+## 同步模型
 
-| 目录 | 说明 |
-|---|---|
-| [server/](server/) | 无状态 baostock 抓取微服务（fetch_service，FastAPI :8090） |
-| [dotnet-mcp/](dotnet-mcp/) | MCP 服务 + 唯一 PG 属主 + 常驻 Drainer（C# .NET 10，:8000 Streamable HTTP） |
+- 数据集：市场级（交易日历/证券列表/股票快照/行业/3 指数成分/5 类宏观）+
+  按码（基本信息/日K/周K/复权因子/分红/6 类季报/业绩快报/业绩预告），
+  分钟线（5 分、30 分）为独立第二遍（全部码的日频先跑完，日线先可用）。
+- **每 (code, dataset) 一条水位**（`sync_watermark`）：覆盖区间 `[first_date, last_date]`
+  即持久断点。切片 = 断点续传最小粒度：抓取 → upsert → 推水位在同一事务，
+  任意时刻杀进程/断网都能从断点续跑。空结果只在「已结算边界」内推进水位
+  （日线=昨天、周线=上一收盘周五、宏观=60 天前、财报=披露截止日），未结算尾部绝不虚报。
+- 复权因子事件驱动：出现比因子表更新的除权除息日即全量重抓（前复权因子依赖全历史）。
+- K 线只存**不复权**原始值；前/后复权在读时由 back 因子推导（`后=raw×B(t)`，
+  `前=raw×B(t)/B(latest)`），存量因子永不过期。
 
-## 迁移历史
+### 全量同步耗时预期（90 次/分钟上限）
 
-本仓库从「Python FastAPI + Celery + PG 单体」迁移到「dotnet 属主 + Python 抓取微服务」，
-全过程（设计决策、分阶段实施、部署验证）见 [TASK.md](TASK.md) 与 [docs/migration-k_d-e2e.md](docs/migration-k_d-e2e.md)。
+| 场景 | 调用量级 | 连续耗时 |
+|---|---|---|
+| 全 A ~5400 码 · 财报回填到 2020（默认） | ≈100 万次 | ≈8 天（可断点分多晚跑） |
+| 全 A · 财报全历史（改 `FINANCIAL_BACKFILL_FLOOR`） | ≈280 万次 | ≈21 天 |
+| 稳态增量（每日一跑） | 每码 ~2–4 次 | ≈3 小时 |
+| 只同步关注列表 | 每码 ~190 次 | 每码 ~2 分钟 |
+
+## 开发
+
+```bash
+uv sync
+uv run pytest            # 单测 + 集成测试（集成用 stockdata_e2e 库，连不上自动跳过）
+uv run stockdata serve   # 本机起服务（等价容器内进程）
+```
+
+- 测试全程 **FakeProvider/假 bs 模块**，不触网；实网冒烟须尊重 5 分钟登录间隔。
+- 代码结构：`src/stockdata/`
+  - `provider/` baostock 封装（错误分类/重试/熔断/登录守卫）
+  - `sync/` 引擎（planner 切片、writers upsert、engine 编排、runner 常驻线程）
+  - `web/` NiceGUI 页面与 REST API；`db/` schema 与查询；`cli.py` Typer 入口

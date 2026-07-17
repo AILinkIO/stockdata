@@ -1,52 +1,29 @@
-# stockdata 部署（仓库根目录，一键拉起见 ./up.sh）：
-#   - PostgreSQL 与 Valkey(Redis) 使用物理机服务（127.0.0.1）
-#   - fetch（无状态 baostock 抓取微服务）/ mcp（dotnet，唯一 PG 属主 + 全部工具 serving）在容器中
-# 容器走 host 网络直连本机服务。旧 api/Celery/alembic 已下线（数据落盘与 serving 全在 dotnet）。
-# 后台同步改由宿主机 cron 调 ./scripts/sync.sh drain（一次性），不再常驻容器服务。
+# stockdata v2 部署（一键拉起见 ./up.sh）：
+#   - PostgreSQL 使用物理机服务（127.0.0.1:5432），容器走 host 网络直连
+#   - 单服务 app：NiceGUI Web（:8050）+ /api/sync/* + 唯一 baostock 同步 worker 线程
+#   - Redis/Valkey 已不再需要（限流为进程内滑窗；任务状态在 PG）
 #
-#   ./up.sh                       # 等价于 sudo docker compose up -d --build
-#   sudo docker compose ps
+# 同步任务的启动/进度两种方式等价（同一份 RunState）：
+#   - Web:  http://127.0.0.1:8050/sync
+#   - CLI:  uv run stockdata sync run --tui        （宿主机直连容器 API）
+#           cron: uv run stockdata sync run --plain 或 curl -X POST .../api/sync/run
+#
+# ⚠️ baostock 登录惰性（启动不触网，首个同步任务才 login），且登录间隔红线（≥5min）
+#    由 PG 持久化守卫强制——容器重启本身安全。
 
 name: stockdata
 
 services:
-  # 无状态 baostock 抓取微服务（fetch_service/），:8090 异步 submit+poll。
-  # baostock 登录惰性（首次 /fetch 才登录）；healthz 不触 baostock。⚠️ 进程长驻、勿频繁重启
-  # （每次重启=新 bs.login，间隔须 >5min，见 TASK §0）。
-  fetch:
-    image: stockdata-fetch
-    build: ./server
-    network_mode: host        # 直连物理机 127.0.0.1 的 PG/Valkey
-    env_file: server/.env     # 注入 STOCKDATA_*（DSN、限流等）
+  app:
+    image: stockdata
+    build: .
+    network_mode: host        # 直连物理机 127.0.0.1 的 PG
+    env_file: .env            # STOCKDATA_PG_DSN 等
     restart: unless-stopped
-    stop_grace_period: 30s
-    command: uv run --no-dev uvicorn fetch_service.app:app --host 0.0.0.0 --port 8090
+    stop_grace_period: 60s    # 留时间完成当前切片事务 + 干净登出
     healthcheck:
-      test: ["CMD", ".venv/bin/python", "-c",
-             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=3)"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
-  # MCP 服务（dotnet-mcp 工程）：:8000 Streamable HTTP。唯一 PG 属主 + 全部工具 serving。
-  # 管线 ON → 工具走 dotnet（直读/落盘 PG + 调 fetch）。ApiBase 为旧 REST 兜底（已下线，管线 ON 不会用到）。
-  mcp:
-    image: stockdata-mcp
-    build: ./dotnet-mcp
-    network_mode: host
-    env_file: server/.env     # 注入 STOCKDATA_PG_DSN（dotnet 直连 PG）
-    environment:
-      StockData__ApiBase: http://127.0.0.1:8080
-      StockData__PipelineEnabled: "true"
-      StockData__FetchBase: http://127.0.0.1:8090
-      StockData__ServeFromPgOnly: "true"   # 读纯走 PG + 懒登记 + 定向高优先有界抓取
-      StockData__ReadFetchBudgetSeconds: "300"  # 读路径定向抓取预算（秒）：Fresh跳过/不Fresh则high优先抓缺口
-    restart: unless-stopped
-    depends_on:
-      fetch:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8000/healthz"]
+      test: [ "CMD", ".venv/bin/python", "-c",
+              "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8050/healthz', timeout=3)" ]
       interval: 30s
       timeout: 5s
       retries: 3
