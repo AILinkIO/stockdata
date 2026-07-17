@@ -64,7 +64,8 @@ uv run stockdata db init          # 初始化 schema（幂等）
 
 ## 数据面 API（/api/v1，供下游拉取）
 
-只读 RESTful JSON API，全部纯 PG 查询、绝不触碰 baostock；OpenAPI 文档见 `/docs`。
+只读 RESTful JSON API，全部纯 PG 查询、绝不触碰 baostock。
+**完整接口文档（参数/示例/约定）见 [`API.md`](API.md)**；在线 Swagger 见 `/docs`。
 响应统一信封 `{"data": ..., "meta": {...}}`；错误为 `{"detail": "..."}` + 标准状态码。
 
 | 端点 | 说明 |
