@@ -175,6 +175,19 @@ class SyncRunner:
             status = "failed"
             events.note(f"run 异常: {e}")
             logger.exception("run 异常")
+        if status == "stopped" and self._shutdown.is_set() and engine.run_id:
+            # 进程关停打断（非用户主动 stop）→ interrupted，下次启动自动续跑
+            status = "interrupted"
+            try:
+                import psycopg
+
+                with psycopg.connect(self._conninfo) as conn:
+                    conn.execute(
+                        "UPDATE sync_run SET status = 'interrupted' WHERE id = %s",
+                        (engine.run_id,),
+                    )
+            except Exception:
+                logger.exception("标记 interrupted 失败")
         with self._lock:
             self._state.running = False
             self._state.status = status

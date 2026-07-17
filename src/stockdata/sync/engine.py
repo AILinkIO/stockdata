@@ -103,6 +103,42 @@ def clear_halt(conninfo: str) -> bool:
         return cur.rowcount > 0
 
 
+def recover_interrupted_run(conninfo: str) -> dict | None:
+    """启动时孤儿收尾：上一进程异常退出遗留的 running 行标记为 interrupted。
+
+    返回需要自动续跑的 params（水位机制保证从断点继续），无则 None：
+    - 只在拿得到 advisory lock 时动手（拿不到 = 有实例真在跑，running 是真的）；
+    - 只有「最新一条 run」是 interrupted 才续跑——更老的孤儿只收尾不触发，
+      用户主动 stopped / 熔断 halted / 正常 done 都不自动续跑。
+    """
+    with psycopg.connect(conninfo, autocommit=True) as conn:
+        locked = conn.execute(
+            "SELECT pg_try_advisory_lock(hashtext(%s))", (ADVISORY_LOCK_KEY,)
+        ).fetchone()[0]
+        if not locked:
+            return None
+        try:
+            orphans = conn.execute(
+                "UPDATE sync_run SET finished_at = now(), status = 'interrupted' "
+                "WHERE status = 'running' RETURNING id"
+            ).fetchall()
+            if orphans:
+                logger.warning(
+                    "启动收尾：%d 条崩溃遗留的 running 任务已标记 interrupted",
+                    len(orphans),
+                )
+            last = conn.execute(
+                "SELECT params, status FROM sync_run ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.execute(
+                "SELECT pg_advisory_unlock(hashtext(%s))", (ADVISORY_LOCK_KEY,)
+            )
+    if last and last[1] == "interrupted":
+        return last[0]
+    return None
+
+
 class SyncEngine:
     def __init__(
         self,
