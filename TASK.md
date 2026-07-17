@@ -20,6 +20,15 @@
 测试：41 通过（provider/限流/守卫/复权单测零网络；引擎/API 集成测试走
 stockdata_e2e 库 + FakeProvider）。
 
+## 已完成（2026-07-17 数据面 API v1）
+
+- ✅ `/api/v1` 只读数据面（`web/api_v1.py`）：kline（读时复权）/ adjust-factors /
+  securities / trade-calendar / industries / index-constituents / financials /
+  dividends / macro / meta/watermarks；kline、adjust-factors、financials、dividends
+  另有 POST batch 端点（codes ≤ 500）
+- ✅ 统一信封 `{"data", "meta"}`；`STOCKDATA_API_KEY` 空=不鉴权，配置后强制 `X-API-Key`
+- ✅ 集成测试 15 例（FakeProvider 种子一次，模块级共享只读）；README「数据面 API」章节
+
 ## 待办 / 后续可选
 
 - ⬜ 首次全量同步（建议先 `--watchlist-only` 或分夜跑全市场，预期见 README 表格）

@@ -62,6 +62,28 @@ uv run stockdata db init          # 初始化 schema（幂等）
   uv run stockdata db reset --yes    # ⚠️ 删全部表重建（数据重新同步）
   ```
 
+## 数据面 API（/api/v1，供下游拉取）
+
+只读 RESTful JSON API，全部纯 PG 查询、绝不触碰 baostock；OpenAPI 文档见 `/docs`。
+响应统一信封 `{"data": ..., "meta": {...}}`；错误为 `{"detail": "..."}` + 标准状态码。
+
+| 端点 | 说明 |
+|---|---|
+| `GET /api/v1/kline/{code}?freq=5/30/d/w&start&end&adjust=none/fore/back&limit` | K 线（读时复权） |
+| `POST /api/v1/kline/batch`（body: codes/freq/start/end/adjust/limit_per_code） | 批量 K 线（codes ≤ 500） |
+| `GET /api/v1/adjust-factors/{code}` · `POST /api/v1/adjust-factors/batch` | 复权因子 |
+| `GET /api/v1/securities?type&status&q&limit&offset` · `GET /api/v1/securities/{code}` | 证券列表/详情（含最新行业） |
+| `GET /api/v1/trade-calendar?start&end&only_trading` | 交易日历 |
+| `GET /api/v1/industries?date` | 行业分类快照（缺省最新） |
+| `GET /api/v1/index-constituents/{sz50\|hs300\|zz500}?date` | 指数成分（缺省最新） |
+| `GET /api/v1/financials/{code}?type&start&end` · `POST /api/v1/financials/batch` | 八类报表（含快报/预告） |
+| `GET /api/v1/dividends/{code}?year` · `POST /api/v1/dividends/batch` | 分红除权 |
+| `GET /api/v1/macro/{kind}?start&end` | 宏观（利率/RRR/货币供应） |
+| `GET /api/v1/meta/watermarks?code&dataset&limit&offset` | **数据新鲜度**（下游先查水位再拉数） |
+
+鉴权：`STOCKDATA_API_KEY` 为空（默认）不鉴权；配置后所有 `/api/v1/*` 要求
+`X-API-Key` 请求头（`/api/sync/*` 内部控制面不受影响）。
+
 ## 同步模型
 
 - 数据集：市场级（交易日历/证券列表/股票快照/行业/3 指数成分/5 类宏观）+
