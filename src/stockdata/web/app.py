@@ -11,7 +11,9 @@ from pydantic import BaseModel
 
 from stockdata.config import settings
 from stockdata.db import queries
-from stockdata.sync.engine import RunParams, clear_halt, read_halt
+from stockdata.sync.engine import (
+    RunParams, clear_halt, read_halt, recover_interrupted_run,
+)
 
 from . import state
 from .api_v1 import router as api_v1_router
@@ -105,6 +107,30 @@ def init_runner(provider=None) -> None:
 
     state.runner = SyncRunner(settings.pg_conninfo, provider, settings)
     logger.info("SyncRunner 已启动（唯一 baostock worker 线程）")
+    _resume_interrupted()
+
+
+def _resume_interrupted() -> None:
+    """崩溃恢复：孤儿 running 收尾；最新一条 interrupted 自动续跑（水位断点续传）。"""
+    try:
+        params = recover_interrupted_run(settings.pg_conninfo)
+    except Exception:
+        logger.exception("启动收尾失败")
+        return
+    if params is None:
+        return
+    if not settings.resume_interrupted_on_start:
+        logger.info("发现被中断的同步任务，但自动续跑已关闭（resume_interrupted_on_start）")
+        return
+    if _read_halt():
+        logger.warning("发现被中断的同步任务，但处于熔断状态，不自动续跑")
+        return
+    ok, msg = state.runner.start(RunParams(
+        codes=params.get("codes", []),
+        datasets=params.get("datasets", []),
+        watchlist_only=params.get("watchlist_only", False),
+    ))
+    logger.info("自动续跑被中断的同步任务 %s：%s", params, msg)
 
 
 def shutdown_runner() -> None:
