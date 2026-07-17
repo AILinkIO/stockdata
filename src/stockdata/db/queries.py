@@ -219,3 +219,222 @@ def watermark_summary() -> dict[str, Any]:
 
 def _iso(v: datetime | date | None) -> str | None:
     return v.isoformat() if v is not None else None
+
+
+# ── /api/v1 数据面查询（只读，供下游拉取）──
+
+_DAILY_KLINE_COLS = (
+    "trade_date", "open", "high", "low", "close", "volume", "amount", "turn",
+    "pct_chg", "preclose", "trade_status", "is_st",
+    "pe_ttm", "pb_mrq", "ps_ttm", "pcf_ncf_ttm",
+)
+_MINUTE_KLINE_COLS = ("bar_time", "open", "high", "low", "close", "volume", "amount")
+
+
+def list_securities(
+    type_: int | None, status: int | None, q: str, limit: int, offset: int
+) -> tuple[int, list[dict[str, Any]]]:
+    where: list[str] = []
+    params: list = []
+    if type_ is not None:
+        where.append("type = %s")
+        params.append(type_)
+    if status is not None:
+        where.append("status = %s")
+        params.append(status)
+    if q:
+        where.append("(code ILIKE %s OR code_name ILIKE %s)")
+        params += [f"%{q}%", f"%{q}%"]
+    cond = ("WHERE " + " AND ".join(where)) if where else ""
+    with get_pool().connection() as conn:
+        total = conn.execute(
+            f"SELECT count(*) FROM security {cond}", params  # noqa: S608
+        ).fetchone()[0]
+        rows = conn.execute(
+            f"SELECT code, code_name, ipo_date, out_date, type, status "  # noqa: S608
+            f"FROM security {cond} ORDER BY code LIMIT %s OFFSET %s",
+            params + [limit, offset],
+        ).fetchall()
+    return total, [
+        {
+            "code": r[0], "code_name": r[1], "ipo_date": r[2],
+            "out_date": r[3], "type": r[4], "status": r[5],
+        }
+        for r in rows
+    ]
+
+
+def kline_rows(
+    code: str, frequency: str, start: date | None, end: date | None, limit: int
+) -> list[dict[str, Any]]:
+    """全字段 K 线（原始不复权值），升序，limit 截断取区间头部。"""
+    if frequency in ("d", "w"):
+        cols, table, tcol = _DAILY_KLINE_COLS, "kline", "trade_date"
+        time_expr = tcol
+    else:
+        cols, table, tcol = _MINUTE_KLINE_COLS, "kline_minute", "bar_time"
+        time_expr = f"({tcol} AT TIME ZONE 'Asia/Shanghai')"
+    sql = (
+        f"SELECT {', '.join(c if c != tcol else f'{time_expr} AS {tcol}' for c in cols)} "  # noqa: S608
+        f"FROM {table} WHERE code = %s AND frequency = %s "
+        f"AND (%s::date IS NULL OR {tcol} >= %s::date) "
+        f"AND (%s::date IS NULL OR {tcol} < (%s::date + 1)) "
+        f"ORDER BY {tcol} LIMIT %s"
+    )
+    with get_pool().connection() as conn:
+        rows = conn.execute(
+            sql, (code, frequency, start, start, end, end, limit)
+        ).fetchall()
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def adjust_factor_rows(codes: list[str]) -> dict[str, list[dict[str, Any]]]:
+    with get_pool().connection() as conn:
+        rows = conn.execute(
+            "SELECT code, divid_operate_date, fore_adjust_factor, "
+            "back_adjust_factor, adjust_factor FROM adjust_factor "
+            "WHERE code = ANY(%s) ORDER BY code, divid_operate_date",
+            (codes,),
+        ).fetchall()
+    out: dict[str, list[dict[str, Any]]] = {c: [] for c in codes}
+    for r in rows:
+        out[r[0]].append({
+            "divid_operate_date": r[1], "fore_adjust_factor": r[2],
+            "back_adjust_factor": r[3], "adjust_factor": r[4],
+        })
+    return out
+
+
+def trade_calendar_rows(
+    start: date | None, end: date | None, only_trading: bool
+) -> list[dict[str, Any]]:
+    sql = (
+        "SELECT calendar_date, is_trading_day FROM trade_calendar "
+        "WHERE (%s::date IS NULL OR calendar_date >= %s) "
+        "AND (%s::date IS NULL OR calendar_date <= %s) "
+    )
+    if only_trading:
+        sql += "AND is_trading_day "
+    sql += "ORDER BY calendar_date"
+    with get_pool().connection() as conn:
+        rows = conn.execute(sql, (start, start, end, end)).fetchall()
+    return [{"calendar_date": r[0], "is_trading_day": r[1]} for r in rows]
+
+
+def industry_rows(snap_date: date | None) -> tuple[date | None, list[dict[str, Any]]]:
+    """行业分类快照；snap_date 缺省取最新一期。"""
+    with get_pool().connection() as conn:
+        if snap_date is None:
+            row = conn.execute("SELECT max(snap_date) FROM stock_industry").fetchone()
+            snap_date = row[0]
+        if snap_date is None:
+            return None, []
+        rows = conn.execute(
+            "SELECT code, industry, industry_classification FROM stock_industry "
+            "WHERE snap_date = %s ORDER BY code",
+            (snap_date,),
+        ).fetchall()
+    return snap_date, [
+        {"code": r[0], "industry": r[1], "industry_classification": r[2]}
+        for r in rows
+    ]
+
+
+def index_constituent_rows(
+    index_code: str, snap_date: date | None
+) -> tuple[date | None, list[dict[str, Any]]]:
+    with get_pool().connection() as conn:
+        if snap_date is None:
+            row = conn.execute(
+                "SELECT max(snap_date) FROM index_constituent WHERE index_code = %s",
+                (index_code,),
+            ).fetchone()
+            snap_date = row[0]
+        if snap_date is None:
+            return None, []
+        rows = conn.execute(
+            "SELECT code, code_name FROM index_constituent "
+            "WHERE index_code = %s AND snap_date = %s ORDER BY code",
+            (index_code, snap_date),
+        ).fetchall()
+    return snap_date, [{"code": r[0], "code_name": r[1]} for r in rows]
+
+
+def macro_rows(kind: str, start: str | None, end: str | None) -> list[dict[str, Any]]:
+    """宏观序列；date_key 为文本（pubDate / 'YYYY-MM' / 'YYYY'），按文本序过滤。"""
+    with get_pool().connection() as conn:
+        rows = conn.execute(
+            "SELECT date_key, payload FROM macro_data WHERE kind = %s "
+            "AND (%s::text IS NULL OR date_key >= %s) "
+            "AND (%s::text IS NULL OR date_key <= %s) ORDER BY date_key",
+            (kind, start, start, end, end),
+        ).fetchall()
+    return [{"date_key": r[0], **(r[1] or {})} for r in rows]
+
+
+def watermark_rows(
+    code: str | None, dataset: str | None, limit: int, offset: int
+) -> tuple[int, list[dict[str, Any]]]:
+    where: list[str] = []
+    params: list = []
+    if code is not None:
+        where.append("code = %s")
+        params.append(code)
+    if dataset is not None:
+        where.append("dataset = %s")
+        params.append(dataset)
+    cond = ("WHERE " + " AND ".join(where)) if where else ""
+    with get_pool().connection() as conn:
+        total = conn.execute(
+            f"SELECT count(*) FROM sync_watermark {cond}", params  # noqa: S608
+        ).fetchone()[0]
+        rows = conn.execute(
+            f"SELECT code, dataset, first_date, last_date, last_synced_at "  # noqa: S608
+            f"FROM sync_watermark {cond} ORDER BY code, dataset LIMIT %s OFFSET %s",
+            params + [limit, offset],
+        ).fetchall()
+    return total, [
+        {
+            "code": r[0], "dataset": r[1], "first_date": r[2],
+            "last_date": r[3], "last_synced_at": r[4],
+        }
+        for r in rows
+    ]
+
+
+def financial_rows(
+    codes: list[str], report_type: str, start: date | None, end: date | None
+) -> dict[str, list[dict[str, Any]]]:
+    with get_pool().connection() as conn:
+        rows = conn.execute(
+            "SELECT code, stat_date, pub_date, metrics FROM financial_report "
+            "WHERE code = ANY(%s) AND report_type = %s "
+            "AND (%s::date IS NULL OR stat_date >= %s) "
+            "AND (%s::date IS NULL OR stat_date <= %s) "
+            "ORDER BY code, stat_date",
+            (codes, report_type, start, start, end, end),
+        ).fetchall()
+    out: dict[str, list[dict[str, Any]]] = {c: [] for c in codes}
+    for r in rows:
+        out[r[0]].append({"stat_date": r[1], "pub_date": r[2], "metrics": r[3]})
+    return out
+
+
+def dividend_rows(
+    codes: list[str], year: int | None
+) -> dict[str, list[dict[str, Any]]]:
+    with get_pool().connection() as conn:
+        rows = conn.execute(
+            "SELECT code, plan_announce_date, year_type, operate_date, detail "
+            "FROM dividend WHERE code = ANY(%s) "
+            "AND (%s::int IS NULL OR EXTRACT(YEAR FROM plan_announce_date) = %s) "
+            "ORDER BY code, plan_announce_date",
+            (codes, year, year),
+        ).fetchall()
+    out: dict[str, list[dict[str, Any]]] = {c: [] for c in codes}
+    for r in rows:
+        out[r[0]].append({
+            "plan_announce_date": r[1], "year_type": r[2],
+            "operate_date": r[3], "detail": r[4],
+        })
+    return out
