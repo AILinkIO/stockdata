@@ -36,4 +36,5 @@ if __name__ in {"__main__", "__mp_main__"}:
         uvicorn_reload_dirs="src",  # 只盯 src/，避免根目录杂文件触发无谓重启
         show=False,
         favicon="🛠️",
+        fastapi_docs=True,
     )

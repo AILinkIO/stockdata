@@ -14,6 +14,9 @@ from stockdata.db import queries
 from stockdata.sync.engine import RunParams, clear_halt, read_halt
 
 from . import state
+from .api_v1 import router as api_v1_router
+
+fastapi_app.include_router(api_v1_router)
 
 logger = logging.getLogger(__name__)
 
@@ -128,4 +131,5 @@ def run_app() -> None:
         reload=False,
         show=False,
         favicon="📈",
+        fastapi_docs=True,  # /docs、/openapi.json（数据面 API 文档）
     )
