@@ -53,7 +53,7 @@ def _label(dataset: str) -> str:
 @ui.page("/sync")
 def sync_page() -> None:
     nav("sync")
-    with ui.column().classes("w-full max-w-5xl mx-auto p-4 gap-4"):
+    with ui.column().classes("w-full px-6 py-4 gap-4"):
         ui.label("同步").classes("text-2xl font-bold")
 
         halt_banner = ui.label("").classes(

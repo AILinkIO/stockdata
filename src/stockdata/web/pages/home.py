@@ -41,7 +41,7 @@ def _sparkline_svg(closes: list[float], w: int = 110, h: int = 28) -> str:
 @ui.page("/")
 def home_page() -> None:
     nav("home")
-    with ui.column().classes("w-full max-w-6xl mx-auto p-4 gap-4"):
+    with ui.column().classes("w-full px-6 py-4 gap-4"):
         with ui.row().classes("w-full items-center justify-between"):
             ui.label("关注列表").classes("text-2xl font-bold")
             with ui.row().classes("gap-2"):

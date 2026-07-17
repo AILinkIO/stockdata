@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from nicegui import ui
+from nicegui import run, ui
 
 from stockdata.db import queries
 from stockdata.web import charts
@@ -149,17 +149,40 @@ def chart_page(code: str) -> None:
     )
     name = queries.security_name(code)
 
-    with ui.column().classes("w-full max-w-6xl mx-auto p-4 gap-2"):
+    with ui.column().classes("w-full px-6 py-4 gap-2"):
         with ui.row().classes("items-center gap-4"):
             ui.label(f"{code} {name}").classes("text-2xl font-bold")
-            options = {
+            # 快速切换：默认展示关注列表；输入时异步查证券表（代码/名称模糊匹配）
+            base_options = {
                 r["code"]: f"{r['code']} {r['code_name'] or ''}".strip()
                 for r in queries.watchlist_overview()
             }
-            options.setdefault(code, f"{code} {name}".strip())
+            base_options.setdefault(code, f"{code} {name}".strip())
             switcher = ui.select(
-                options, value=code, with_input=True, label="切换股票"
-            ).classes("w-56").props("dense outlined")
+                base_options, value=code, with_input=True, label="切换股票",
+            ).classes("w-80").props(
+                'dense outlined options-dense clearable input-debounce=200 '
+                'popup-content-class="max-h-96"'
+            )
+            with switcher.add_slot("prepend"):
+                ui.icon("search").classes("text-gray-400")
+
+            async def search(e) -> None:
+                q = (str(e.args or "")).strip()
+                if q:
+                    _, found = await run.io_bound(
+                        queries.list_securities, None, None, q, 50, 0
+                    )
+                    opts = {
+                        r["code"]: f"{r['code']} {r['code_name'] or ''}".strip()
+                        for r in found
+                    }
+                else:
+                    opts = dict(base_options)
+                opts.setdefault(code, f"{code} {name}".strip())
+                switcher.set_options(opts)
+
+            switcher.on("input-value", search)
             switcher.on_value_change(
                 lambda e: e.value and e.value != code
                 and ui.navigate.to(f"/chart/{e.value}")
@@ -331,9 +354,10 @@ def _jsonb_table(rows: list[dict], base_cols: list[tuple[str, str]],
 
     与固定列重复的键剔除；表头允许换行，列宽自适应容器不出横向滚动条。
     """
+    order = {k: i for i, k in enumerate(_METRIC_DEFS)}
     keys = sorted(
         {k for r in rows for k in (r[json_field] or {})} - _EXCLUDED_KEYS,
-        key=lambda k: (k not in _METRIC_DEFS, k),
+        key=lambda k: (order.get(k, len(order)), k),
     )
     columns = [
         {"name": n, "label": lbl, "field": n, "align": "left", "sortable": True}
