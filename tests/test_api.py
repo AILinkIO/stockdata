@@ -58,6 +58,26 @@ def test_run_lifecycle_over_http(api):
     assert "k_d" in datasets and "k_5" in datasets
 
 
+def test_sync_logs_stream(api):
+    """滚动同步日志：生命周期行 + 切片行；seq 跨 run 单调递增（前端增量拉取依据）。"""
+    api.post("/api/sync/run", json={"codes": ["sh.600000"]})
+    _wait_finished(api)
+    logs = api.get("/api/sync/status").json()["state"]["logs"]
+    texts = [e["text"] for e in logs]
+    assert any("▶ 同步开始" in t for t in texts)
+    assert any("■ 同步结束：done" in t for t in texts)
+    assert any("入库" in t for t in texts)
+    seqs = [e["seq"] for e in logs]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+    last_seq = seqs[-1]
+
+    # 第二次 run：RunState 重建但 seq 不回退
+    api.post("/api/sync/run", json={"codes": ["sh.600000"]})
+    _wait_finished(api)
+    logs2 = api.get("/api/sync/status").json()["state"]["logs"]
+    assert logs2[0]["seq"] > last_seq
+
+
 def test_stop_and_clear_halt_endpoints(api):
     # 空闲时 stop 返回 stopping=false
     assert api.post("/api/sync/stop").json() == {"stopping": False}

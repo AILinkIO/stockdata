@@ -63,10 +63,13 @@ def sync_page() -> None:
         def _start(params: RunParams, what: str) -> None:
             if _halt():
                 ui.notify("处于熔断状态，先清除熔断", type="warning")
+                sync_log.push(f"{time.strftime('%H:%M:%S')} ⚠ 未启动{what}：处于熔断状态")
                 return
             ok, msg = state.get_runner().start(params)
             ui.notify(f"已启动{what}" if ok else f"未启动：{msg}",
                       type="positive" if ok else "warning")
+            if not ok:
+                sync_log.push(f"{time.strftime('%H:%M:%S')} ⚠ 未启动{what}：{msg}")
 
         def stop_run() -> None:
             if state.get_runner().stop():
@@ -90,11 +93,11 @@ def sync_page() -> None:
         progress = ui.linear_progress(value=0, show_value=False).classes("w-full")
         detail_label = ui.label("").classes("text-sm")
         stat_label = ui.label("").classes("text-sm text-gray-600")
-        notes_log = ui.log(max_lines=10).classes("w-full h-32")
 
-        errors_expand = ui.expansion("错误明细", icon="error_outline").classes("w-full")
-        with errors_expand:
-            errors_log = ui.log(max_lines=50).classes("w-full h-48")
+        ui.label("同步日志").classes("text-sm font-bold mt-1")
+        sync_log = ui.log(max_lines=500).classes(
+            "w-full h-64 font-mono text-xs"
+        )
 
         ui.separator().classes("mt-2")
 
@@ -217,7 +220,7 @@ def sync_page() -> None:
 
         runs_table.on("rowClick", lambda e: show_run_detail(e.args[1]["id"]))
 
-        seen = {"notes": 0, "errors": 0}
+        last_seq = {"v": 0}
 
         def refresh() -> None:
             runner = state.runner
@@ -262,12 +265,10 @@ def sync_page() -> None:
                 f"{settings.rate_limit_per_minute}）· 错误 {len(st['errors'])}"
                 f"{elapsed}{eta}"
             )
-            for note in st["notes"][seen["notes"]:]:
-                notes_log.push(note)
-            seen["notes"] = len(st["notes"])
-            for err in st["errors"][seen["errors"]:]:
-                errors_log.push(f"{err['code']}/{err['dataset']}: {err['error']}")
-            seen["errors"] = len(st["errors"])
+            for entry in st["logs"]:
+                if entry["seq"] > last_seq["v"]:
+                    sync_log.push(entry["text"])
+                    last_seq["v"] = entry["seq"]
 
             wms = queries.market_watermarks()
             market_table.rows = [

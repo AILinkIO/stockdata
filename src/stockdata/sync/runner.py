@@ -45,11 +45,15 @@ class RunState:
     status: str = ""          # 上次结束状态 done/stopped/halted/failed
     started_at: float | None = None
     finished_at: float | None = None
+    # 滚动同步日志：{"seq": 全局递增序号, "text": 行文本}。
+    # seq 由 SyncRunner 维护、跨 run 不重置，前端按 seq 增量拉取。
+    logs: list[dict] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         d = asdict(self)
         d["errors"] = self.errors[-20:]
         d["notes"] = self.notes[-10:]
+        d["logs"] = self.logs[-100:]
         return d
 
 
@@ -64,11 +68,13 @@ class _StateEvents(EngineEvents):
             self._r._state.phase = name
             self._r._state.current_code = ""
             self._r._state.current_label = ""
+        self._r.push_log(f"—— {name} ——")
 
     def code_start(self, code: str, idx: int, total: int) -> None:
         with self._r._lock:
             st = self._r._state
             st.current_code, st.code_idx, st.code_total = code, idx, total
+        self._r.push_log(f"[{idx}/{total}] {code}")
 
     def slice_done(self, code: str, dataset: str, label: str, rows: int) -> None:
         with self._r._lock:
@@ -77,18 +83,23 @@ class _StateEvents(EngineEvents):
             st.slices_done += 1
             st.rows_total += rows
             st.rows_by_dataset[dataset] = st.rows_by_dataset.get(dataset, 0) + rows
+        prefix = f"{code} " if code else ""
+        self._r.push_log(f"{prefix}{label}: 入库 {rows} 行")
 
     def dataset_error(self, code: str, dataset: str, error: str) -> None:
         with self._r._lock:
             self._r._state.errors.append(
                 {"code": code, "dataset": dataset, "error": error[:500]}
             )
+        where = "/".join(x for x in (code, dataset) if x)
+        self._r.push_log(f"❌ {where}: {error[:200]}")
 
     def note(self, msg: str) -> None:
         logger.info("%s", msg)
         with self._r._lock:
             self._r._state.notes.append(msg)
             del self._r._state.notes[:-50]
+        self._r.push_log(msg)
 
 
 class SyncRunner:
@@ -98,6 +109,7 @@ class SyncRunner:
         self._settings = settings
         self._lock = threading.Lock()
         self._state = RunState()
+        self._log_seq = 0  # 日志序号跨 run 单调递增（RunState 重建也不重置）
         self._stop_event = threading.Event()
         self._shutdown = threading.Event()
         self._pending: RunParams | None = None
@@ -106,6 +118,15 @@ class SyncRunner:
         self._thread.start()
 
     # ── 控制面 ──
+
+    def push_log(self, text: str) -> None:
+        """追加一行滚动日志（自动加时间戳与递增 seq，线程安全）。"""
+        with self._lock:
+            self._log_seq += 1
+            self._state.logs.append(
+                {"seq": self._log_seq, "text": f"{time.strftime('%H:%M:%S')} {text}"}
+            )
+            del self._state.logs[:-500]
 
     def start(self, params: RunParams) -> tuple[bool, str]:
         """请求启动一次 run。已在跑返回 (False, reason)。"""
@@ -166,6 +187,7 @@ class SyncRunner:
     def _run_once(self, params: RunParams) -> None:
         with self._lock:
             self._state = RunState(running=True, started_at=time.time())
+        self.push_log(f"▶ 同步开始：{_params_summary(params)}")
         events = _StateEvents(self)
         engine = SyncEngine(
             self._conninfo, self._provider, self._settings,
@@ -199,6 +221,8 @@ class SyncRunner:
             self._state.status = status
             self._state.run_id = engine.run_id
             self._state.finished_at = time.time()
+            rows, errs = self._state.rows_total, len(self._state.errors)
+        self.push_log(f"■ 同步结束：{status} · 入库 {rows} 行 · 错误 {errs}")
 
     # ── 熔断自动探测（仅 login_error；拉黑绝不自动探测）──
 
@@ -313,3 +337,15 @@ class SyncRunner:
                 self._provider.idle_logout()
         except Exception:
             logger.exception("空闲登出失败")
+
+
+def _params_summary(params: RunParams) -> str:
+    """RunParams → 日志里的一句话摘要。"""
+    if params.watchlist_only:
+        return "关注列表"
+    if params.codes:
+        head = "、".join(params.codes[:3]) + ("…" if len(params.codes) > 3 else "")
+        return f"指定股票（{head}）"
+    if params.datasets:
+        return f"市场数据集 ×{len(params.datasets)}"
+    return "全市场"

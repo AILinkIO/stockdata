@@ -33,10 +33,120 @@ _STATUS_LABELS = {1: "上市", 0: "退市"}
 
 _EMPTY_HINT = "还没有数据（在「同步」页跑一次关注列表同步后这里会有内容）"
 
+# jsonb 指标字段 → (中文表头, 格式)。格式决定数值换算，与表头单位保持一致：
+#   pct   baostock 小数比率 → ×100 显示为 %
+#   e8    元/股 → ÷1e8 显示为 亿
+#   num   数值原样（保留原始精度、去尾零）
+#   text  文本/日期原样
+# 与固定列重复的 code/statDate/pubDate 等在 _EXCLUDED_KEYS 里剔除。
+_EXCLUDED_KEYS = {
+    "code", "statDate", "pubDate",
+    "performanceExpPubDate", "performanceExpStatDate",
+    "dividPlanAnnounceDate", "dividOperateDate",
+}
+_METRIC_DEFS: dict[str, tuple[str, str]] = {
+    # 盈利能力
+    "roeAvg": ("净资产收益率(%)", "pct"),
+    "npMargin": ("销售净利率(%)", "pct"),
+    "gpMargin": ("销售毛利率(%)", "pct"),
+    "netProfit": ("净利润(亿元)", "e8"),
+    "epsTTM": ("每股收益TTM(元)", "num"),
+    "MBRevenue": ("主营营业收入(亿元)", "e8"),
+    "totalShare": ("总股本(亿股)", "e8"),
+    "liqaShare": ("流通股本(亿股)", "e8"),
+    # 营运能力
+    "NRTurnRatio": ("应收账款周转率(次)", "num"),
+    "NRTurnDays": ("应收账款周转天数(天)", "num"),
+    "INVTurnRatio": ("存货周转率(次)", "num"),
+    "INVTurnDays": ("存货周转天数(天)", "num"),
+    "CATurnRatio": ("流动资产周转率(次)", "num"),
+    "AssetTurnRatio": ("总资产周转率(次)", "num"),
+    # 成长能力
+    "YOYEquity": ("净资产同比(%)", "pct"),
+    "YOYAsset": ("总资产同比(%)", "pct"),
+    "YOYNI": ("净利润同比(%)", "pct"),
+    "YOYEPSBasic": ("基本每股收益同比(%)", "pct"),
+    "YOYPNI": ("归母净利润同比(%)", "pct"),
+    # 偿债能力
+    "currentRatio": ("流动比率", "num"),
+    "quickRatio": ("速动比率", "num"),
+    "cashRatio": ("现金比率", "num"),
+    "YOYLiability": ("总负债同比(%)", "pct"),
+    "liabilityToAsset": ("资产负债率(%)", "pct"),
+    "assetToEquity": ("权益乘数", "num"),
+    # 现金流量
+    "CAToAsset": ("流动资产/总资产(%)", "pct"),
+    "NCAToAsset": ("非流动资产/总资产(%)", "pct"),
+    "tangibleAssetToAsset": ("有形资产/总资产(%)", "pct"),
+    "ebitToInterest": ("已获利息倍数(倍)", "num"),
+    "CFOToOR": ("经营现金流/营业收入(%)", "pct"),
+    "CFOToNP": ("经营现金流/净利润(%)", "pct"),
+    "CFOToGr": ("经营现金流/营业总收入(%)", "pct"),
+    # 杜邦指数
+    "dupontROE": ("净资产收益率(%)", "pct"),
+    "dupontAssetStoEquity": ("权益乘数", "num"),
+    "dupontAssetTurn": ("总资产周转率(次)", "num"),
+    "dupontPnitoni": ("归母净利/净利润(%)", "pct"),
+    "dupontNitogr": ("净利润/营业总收入(%)", "pct"),
+    "dupontTaxBurden": ("税收负担(%)", "pct"),
+    "dupontIntburden": ("利息负担(%)", "pct"),
+    "dupontEbittogr": ("EBIT/营业总收入(%)", "pct"),
+    # 业绩快报
+    "performanceExpUpdateDate": ("更新日期", "text"),
+    "performanceExpressTotalAsset": ("总资产(亿元)", "e8"),
+    "performanceExpressNetAsset": ("净资产(亿元)", "e8"),
+    "performanceExpressEPSDiluted": ("每股收益·摊薄(元)", "num"),
+    "performanceExpressROEWa": ("加权净资产收益率(%)", "num"),  # 源数据已是百分数
+    "performanceExpressGRYOY": ("营业总收入同比(%)", "pct"),
+    "performanceExpressOPYOY": ("营业利润同比(%)", "pct"),
+    "performanceExpressEPSChgPct": ("每股收益同比(%)", "pct"),
+    # 业绩预告
+    "profitForcastType": ("预告类型", "text"),
+    "profitForcastAbstract": ("预告摘要", "text"),
+    "profitForcastChgPctUp": ("变动幅度上限(%)", "num"),
+    "profitForcastChgPctDwn": ("变动幅度下限(%)", "num"),
+    # 分红除权
+    "dividPreNoticeDate": ("预披露公告日", "text"),
+    "dividAgmPumDate": ("股东大会公告日", "text"),
+    "dividPlanDate": ("分红实施公告日", "text"),
+    "dividRegistDate": ("股权登记日", "text"),
+    "dividPayDate": ("派息日", "text"),
+    "dividStockMarketDate": ("红股上市日", "text"),
+    "dividCashPsBeforeTax": ("每股股利·税前(元)", "num"),
+    "dividCashPsAfterTax": ("每股股利·税后(元)", "num"),
+    "dividStocksPs": ("每股红股(股)", "num"),
+    "dividReserveToStockPs": ("每股转增(股)", "num"),
+    "dividCashStock": ("分红送转说明", "text"),
+}
+
+
+def _fmt_metric(key: str, value) -> str:
+    """按 _METRIC_DEFS 的单位换算数值；空值/非数值原样兜底。"""
+    if value is None or value == "":
+        return "—"
+    kind = _METRIC_DEFS.get(key, ("", "text"))[1]
+    if kind in ("pct", "e8"):
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+        return f"{v * 100:.2f}" if kind == "pct" else f"{v / 1e8:.2f}"
+    if kind == "num":
+        try:
+            return f"{float(value):.4f}".rstrip("0").rstrip(".")
+        except (TypeError, ValueError):
+            return str(value)
+    return str(value)
+
 
 @ui.page("/chart/{code}")
 def chart_page(code: str) -> None:
     nav("chart")
+    # 指标表：表头随列宽换行，整表自适应容器宽度
+    ui.add_css(
+        ".metrics-table th { white-space: normal; line-height: 1.3; }"
+        ".metrics-table { width: 100%; }"
+    )
     name = queries.security_name(code)
 
     with ui.column().classes("w-full max-w-6xl mx-auto p-4 gap-2"):
@@ -62,7 +172,7 @@ def chart_page(code: str) -> None:
             tab_perf = ui.tab("业绩")
             tab_div = ui.tab("分红")
 
-        with ui.tab_panels(tabs, value=tab_k).classes("w-full"):
+        with ui.tab_panels(tabs, value=tab_k).classes("w-full mt-3"):
             with ui.tab_panel(tab_k).classes("p-0"):
                 _kline_panel(code, name)
             with ui.tab_panel(tab_basic):
@@ -110,13 +220,17 @@ def _kline_panel(code: str, name: str) -> None:
                 columns=[
                     {"name": "t", "label": "时间", "field": "t", "align": "left",
                      "sortable": True},
-                    {"name": "open", "label": "开", "field": "open", "align": "right"},
-                    {"name": "high", "label": "高", "field": "high", "align": "right"},
-                    {"name": "low", "label": "低", "field": "low", "align": "right"},
-                    {"name": "close", "label": "收", "field": "close", "align": "right"},
-                    {"name": "volume", "label": "成交量", "field": "volume",
+                    {"name": "open", "label": "开盘", "field": "open",
                      "align": "right"},
-                    {"name": "amount", "label": "成交额", "field": "amount",
+                    {"name": "high", "label": "最高", "field": "high",
+                     "align": "right"},
+                    {"name": "low", "label": "最低", "field": "low",
+                     "align": "right"},
+                    {"name": "close", "label": "收盘", "field": "close",
+                     "align": "right"},
+                    {"name": "volume", "label": "成交量(万股)", "field": "volume",
+                     "align": "right"},
+                    {"name": "amount", "label": "成交额(万元)", "field": "amount",
                      "align": "right"},
                 ],
                 rows=[],
@@ -160,8 +274,8 @@ def _kline_panel(code: str, name: str) -> None:
                     "high": f"{r['high']:.2f}",
                     "low": f"{r['low']:.2f}",
                     "close": f"{r['close']:.2f}",
-                    "volume": int(r["volume"] or 0),
-                    "amount": float(r["amount"] or 0),
+                    "volume": f"{float(r['volume'] or 0) / 1e4:,.2f}",
+                    "amount": f"{float(r['amount'] or 0) / 1e4:,.2f}",
                 }
                 for _, r in adjusted.iterrows()
             ]
@@ -213,25 +327,34 @@ def _basic_panel(code: str) -> None:
 
 def _jsonb_table(rows: list[dict], base_cols: list[tuple[str, str]],
                  json_field: str) -> None:
-    """base_cols 固定列 + json 字段的键动态展开为列，横向可滚动。"""
-    keys = sorted({k for r in rows for k in (r[json_field] or {})})
+    """base_cols 固定列 + json 字段的键动态展开为列（中文表头+单位，数值随单位换算）。
+
+    与固定列重复的键剔除；表头允许换行，列宽自适应容器不出横向滚动条。
+    """
+    keys = sorted(
+        {k for r in rows for k in (r[json_field] or {})} - _EXCLUDED_KEYS,
+        key=lambda k: (k not in _METRIC_DEFS, k),
+    )
     columns = [
         {"name": n, "label": lbl, "field": n, "align": "left", "sortable": True}
         for n, lbl in base_cols
-    ] + [{"name": k, "label": k, "field": k, "align": "right"} for k in keys]
+    ] + [
+        {"name": k, "label": _METRIC_DEFS.get(k, (k,))[0], "field": k,
+         "align": "right"}
+        for k in keys
+    ]
     table_rows = [
         {
             **{n: r[n] or "—" for n, _ in base_cols},
-            **{k: str(v) for k, v in (r[json_field] or {}).items()},
+            **{k: _fmt_metric(k, (r[json_field] or {}).get(k)) for k in keys},
         }
         for r in rows
     ]
-    with ui.element("div").classes("w-full overflow-x-auto"):
-        ui.table(
-            columns=columns, rows=table_rows, row_key=base_cols[0][0],
-            pagination={"rowsPerPage": 12, "sortBy": base_cols[0][0],
-                        "descending": True},
-        ).props("dense").classes("w-full")
+    ui.table(
+        columns=columns, rows=table_rows, row_key=base_cols[0][0],
+        pagination={"rowsPerPage": 12, "sortBy": base_cols[0][0],
+                    "descending": True},
+    ).props("dense wrap-cells").classes("w-full mt-2 metrics-table")
 
 
 def _financial_panel(code: str) -> None:
